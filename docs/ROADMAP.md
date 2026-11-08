@@ -553,6 +553,7 @@ been run live.
 - [ ] Show the pictures a person adds while a build runs (a note's pictures, a follow-up's) to an
       API builder whose model sees, with the message that tells it about them; it's shown only
       what reference/ and capture/ hold when a run starts, and each check's pictures
+      — claimed: youkaicountry, branch feature/r5.4-added-pictures
 - [ ] Beside "Sees pictures" set to Auto in Settings → AI, say what the AI's server says (it sees,
       it doesn't, or nothing, which means no pictures), asked off the UI thread as `ai vision`
       does; it was to come with the context budget's server question in Settings (#1753)

@@ -609,6 +609,14 @@ been run live.
       sees get the check's screenshot and the person's pictures attached to its next message
 - [ ] Shrink a picture larger than `MAX_IMAGE_BYTES` (3.75 MB) before it's shown to a model,
       instead of refusing it (a 4K screenshot as PNG can be larger)
+- [ ] Before pictures reach a builder, bound a request's pictures as a whole (how many and their
+      total size: `MAX_IMAGE_BYTES` bounds each one alone) and keep to each provider's own limits
+      on a picture's size and dimensions (review of #1175)
+- [ ] Test pictures with real PNG, JPEG, WebP and GIF files that decode, sent to a provider that
+      takes them: today's fixtures are magic bytes, so they test the type and the wire format, not
+      the picture. Test several live and resumed pictures interleaved with text too, since the
+      content array keeps their order. The 1,600-token estimate per picture isn't every model's
+      cost (review of #1175)
 
 ### R5.5 API-key builds fail in words people can use
 Owner: open · Status: todo

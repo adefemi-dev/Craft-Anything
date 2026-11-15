@@ -2584,6 +2584,76 @@ mod picking_up_a_build {
         }
     }
 
+    /// A note of pictures alone is a request of its own, named as pictures; pictures repeated
+    /// across notes go once; and past the limit, the first ones go with the note.
+    #[test]
+    fn a_note_of_pictures_alone_is_shown_each_picture_once_within_the_limit() {
+        use crate::agent::tests::{Scripted, turn};
+        use crate::agent::{ApiConversation, EngineHost, LoopConfig, MAX_PICTURES, ModelSlot};
+        use crate::model::{Block, Msg, StopReason};
+        let pictures =
+            |m: &Msg| -> Vec<String> { m.blocks.iter().filter_map(|b| if let Block::Image { name, .. } = b { Some(name.clone()) } else { None }).collect() };
+        let b = bench();
+        let mut ws = worked_on(&b);
+        std::fs::create_dir_all(ws.attachments_dir()).unwrap();
+        let shots: Vec<PathBuf> = (0..MAX_PICTURES + 2).map(|i| ws.attachments_dir().join(format!("p{i}.png"))).collect();
+        for s in &shots {
+            std::fs::write(s, PNG).unwrap();
+        }
+        let seen = Arc::default();
+        let done = || turn(vec![Block::Text { text: "Done.".into() }], StopReason::EndTurn);
+        let write = |content: &str| {
+            let input = serde_json::json!({"path": "app/index.html", "content": content});
+            turn(vec![Block::ToolUse { id: "w".into(), name: "build_file_write".into(), input }], StopReason::ToolUse)
+        };
+        let turns = std::collections::VecDeque::from([done(), write("Blue"), done(), write("Bluer"), done()]);
+        let script = Scripted { turns, seen: Arc::clone(&seen) };
+        let worker = check_worker(&ws, false);
+        let (first, second) = shots.split_at(4);
+        let mut words_none: Vec<PathBuf> = first.to_vec();
+        words_none.push(first[0].clone());
+        let mut with_words: Vec<PathBuf> = vec![first[3].clone()];
+        with_words.extend(second.iter().cloned());
+        worker.notes.lock().unwrap().extend([
+            Note { id: 7, text: String::new(), shown: String::new(), pictures: words_none, questions: Vec::new() },
+            Note { id: 8, text: "And these.".into(), shown: "And these.".into(), pictures: with_words, questions: Vec::new() },
+        ]);
+        let slot = ModelSlot {
+            name: "Scripted".into(),
+            model: Box::new(script),
+            local: true,
+            effort: None,
+            max_turns: 10,
+            context_tokens: 0,
+            tools: Default::default(),
+            vision: crate::Vision::Yes,
+        };
+        let mut worker = worker;
+        let build = std::collections::BTreeSet::from([craft_anything_engine::Toolset::Core, craft_anything_engine::Toolset::Build]);
+        let api = ApiConversation::start_with(Arc::new(EngineHost(worker.engine.clone())), vec![slot], LoopConfig::default(), build).unwrap();
+        let entry = crate::BackendEntry {
+            config: crate::BackendConfig {
+                name: "Scripted".into(),
+                kind: BackendKind::OpenaiCompatible,
+                model: "scripted".into(),
+                base_url: None,
+                ssh_host: None,
+                enabled: true,
+            },
+            options: Default::default(),
+        };
+        let mut opts = RunOptions { message: Some("Make it blue.".into()), ..RunOptions::default() };
+        opts.kinds.register(Arc::new(PicturedKind));
+        worker.run(&mut ws, entry, Some(api), None, super::super::KeptHistory { in_mode: true, elsewhere: false }, &opts).unwrap();
+        let seen = seen.lock().unwrap();
+        let note = seen[1].last().unwrap();
+        let named: Vec<String> = (0..4).map(|i| format!("attachments/p{i}.png")).collect();
+        assert!(note.text().contains(&format!("Pictures, with no words ({}): they show what the person means.", named.join(", "))), "{}", note.text());
+        assert!(note.text().contains("And these."), "{}", note.text());
+        let expected: Vec<String> = (0..MAX_PICTURES).map(|i| format!("attachments/p{i}.png")).collect();
+        assert_eq!(pictures(note), expected, "each once, in order, the first {MAX_PICTURES}");
+    }
+
     #[test]
     fn new_notes_during_a_turn_or_check_get_their_own_attempt_but_empty_notes_do_not() {
         use crate::agent::tests::{Scripted, turn};

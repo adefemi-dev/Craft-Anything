@@ -131,7 +131,10 @@ pub struct RunOptions {
     /// which carries attachment paths). `None` adds nothing to the feed.
     pub shown: Option<String>,
     /// The pictures attached to `shown` (their copies in the project), so the feed keeps them
-    /// with the message for Up to bring back.
+    /// with the message for Up to bring back. A builder whose model sees is shown them with the
+    /// run's first message, so they belong to a `message`, which names them: a request of
+    /// pictures alone still has that line as its words (the app's `with_attachments` writes it).
+    /// Without a `message` the run is a Try again, and they aren't shown.
     pub shown_pictures: Vec<PathBuf>,
     /// Pick up a build whose last run stopped part-way (paused, the app closed, the computer
     /// stopped): Study isn't repeated when it was done, and an agent with a saved session is
@@ -189,6 +192,13 @@ pub struct Note {
     /// they're marked told when the builder reads the note or when the after-turn path sends it.
     /// The raw note text stays in [`text`](Self::text), so a later run filters them by its mode.
     pub questions: Vec<AskedQuestion>,
+}
+
+impl Note {
+    /// It has words or pictures, so it's a request of its own; a blank one is dropped.
+    pub fn says_something(&self) -> bool {
+        !self.text.trim().is_empty() || !self.pictures.is_empty()
+    }
 }
 
 /// The note text with the latest Just-ask answers this mode may show. `skip` holds answers an
@@ -695,10 +705,10 @@ impl Worker {
         Ok(())
     }
 
-    /// The prompt for notes the person added while the agent worked, if there are any, and the
-    /// Just-ask answers it carries so they're marked told once the turn finishes.
-    /// What the person added while the builder worked, as the next message, with the questions it
-    /// tells the builder about and the pictures the notes carry (relative to the project).
+    /// What the person added while the builder worked, as the next message, if there's anything:
+    /// with the Just-ask answers it tells the builder about (marked told once the turn finishes)
+    /// and the pictures the notes carry (relative to the project, each once). A note counts if it
+    /// has words or pictures; one of pictures alone is named as that.
     fn added(&self, ws: &mut Workspace, deep: bool, sees_pictures: bool) -> Option<(String, Vec<AskedQuestion>, Vec<PathBuf>)> {
         let mut notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(PoisonError::into_inner));
         if notes.is_empty() {
@@ -709,7 +719,7 @@ impl Worker {
         for n in &notes {
             notes::forget(&dir, n.id);
         }
-        notes.retain(|n| !n.text.trim().is_empty());
+        notes.retain(Note::says_something);
         if notes.is_empty() {
             return None;
         }
@@ -727,7 +737,16 @@ impl Worker {
         questions.extend(extra);
         let context = just_asked(&questions);
         let pictures = pictures::in_project(&ws.root, &notes.iter().flat_map(|n| n.pictures.iter().cloned()).collect::<Vec<_>>());
-        let texts: Vec<String> = notes.into_iter().map(|n| n.text).collect();
+        let texts: Vec<String> = notes
+            .into_iter()
+            .map(|n| {
+                if !n.text.trim().is_empty() {
+                    return n.text;
+                }
+                let names = pictures::in_project(&ws.root, &n.pictures).iter().map(|p| p.display().to_string().replace('\\', "/")).collect::<Vec<_>>();
+                format!("Pictures, with no words ({}): they show what the person means.", names.join(", "))
+            })
+            .collect();
         Some((context + &added_prompt(&texts) + &pictures_reminder(ws, sees_pictures), questions, pictures))
     }
 
@@ -1467,7 +1486,7 @@ impl Worker {
             *notes = waiting;
             read
         };
-        let new_request = read.iter().any(|n| !n.text.trim().is_empty());
+        let new_request = read.iter().any(Note::says_something);
         for n in read {
             // The agent's hook took the note, so the Just-ask answers in its text were told.
             if !n.questions.is_empty()

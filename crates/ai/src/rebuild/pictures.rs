@@ -106,10 +106,20 @@ fn take_in_turn(pages: &[Vec<Vec<PathBuf>>], max: usize, picked: &mut Vec<PathBu
 }
 
 /// Pictures the person attached (their copies in the project, as notes and follow-ups carry
-/// them), relative to the project folder; one outside it is left out, so no path outside the
-/// project is ever named to a model.
+/// them), relative to the project folder, each once, in order. One that isn't under the folder
+/// as written (elsewhere, or climbing out of it with `..`) is left out, so it's never named to a
+/// model. This reads only the paths: a link in the project that leads out is refused when the
+/// picture is read ([`load`]).
 pub(super) fn in_project(root: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
-    files.iter().filter_map(|f| f.strip_prefix(root).ok()).filter(|r| !r.as_os_str().is_empty()).map(Path::to_path_buf).collect()
+    use std::path::Component;
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for rel in files.iter().filter_map(|f| f.strip_prefix(root).ok()) {
+        let plain = rel.components().all(|c| matches!(c, Component::Normal(_)));
+        if plain && !rel.as_os_str().is_empty() && !kept.iter().any(|k| k == rel) {
+            kept.push(rel.components().collect());
+        }
+    }
+    kept
 }
 
 /// The largest picture file read to be shrunk; past it a picture isn't shown.
@@ -480,5 +490,23 @@ mod tests {
         let names: Vec<&str> = shown.iter().filter_map(|b| if let Block::Image { name, .. } = b { Some(name.as_str()) } else { None }).collect();
         assert_eq!(names, ["app/alias.png"]);
         assert_eq!(skipped, ["app/out.png (outside the project, through a link)", "app/away/secret.png (outside the project, through a link)"]);
+    }
+
+    #[test]
+    fn an_attached_picture_is_named_only_if_its_path_is_in_the_project() {
+        let root = Path::new("/projects/blue");
+        let files = [
+            root.join("attachments/a.png"),
+            root.join("attachments/../../elsewhere.png"),
+            PathBuf::from("/projects/other/b.png"),
+            root.to_path_buf(),
+            root.join("attachments/./c.png"),
+            root.join("attachments/a.png"),
+            root.join("attachments/d.png"),
+        ];
+        let kept: Vec<String> = in_project(root, &files).iter().map(|p| p.display().to_string().replace('\\', "/")).collect();
+        // `./` is plain enough as written, but `Path::components` drops it, so it's kept as c.png;
+        // a repeat is kept once, where it first came.
+        assert_eq!(kept, ["attachments/a.png", "attachments/c.png", "attachments/d.png"]);
     }
 }

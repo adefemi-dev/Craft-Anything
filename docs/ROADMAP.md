@@ -546,6 +546,9 @@ been run live.
       pictures, so it sees only what the run attaches (the original's with the first message, each
       check's after it), not a screenshot it takes of its own build mid-turn or one in reference/
       that went past the six a message carries
+      Seen live once: a local Qwen through llama-swap, asked for a page whose heading is written in
+      a picture in the project, opened it with `build_file_read`, was shown it after the result,
+      and used the words that were only in the picture (it also saw the picture cut off a letter)
       — claimed: youkaicountry, branch feature/r5.4-builder-opens-pictures
 - [ ] Show the pictures a person adds while a build runs (a note's pictures, a follow-up's) to an
       API builder whose model sees, with the message that tells it about them; it's shown only

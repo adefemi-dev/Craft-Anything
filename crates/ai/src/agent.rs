@@ -30,6 +30,10 @@ pub const BUILDER_MAX_TURNS: u32 = 400;
 /// The build tool whose result says whether the command succeeded (`succeeded`, typed).
 const BUILD_COMMAND_TOOL: &str = "build_command_run";
 
+/// The one tool whose result can open a picture (its typed `picture` field, a path it checked is
+/// in the project). The same field from any other tool is only data.
+const PICTURE_TOOL: &str = "build_file_read";
+
 /// Build commands that fail one after another, with none succeeding in between, before a step
 /// stops (#399: a model wrote code against APIs that don't exist, never got it to compile, and
 /// spent 9.4M tokens in one stage). Each failed build sends the whole conversation again.
@@ -1030,7 +1034,8 @@ impl AgentLoop {
                         None => {}
                     }
                 }
-                if let ToolOutput::Value(v) = &out
+                if name == PICTURE_TOOL
+                    && let ToolOutput::Value(v) = &out
                     && let Some(picture) = v.get("picture").and_then(Value::as_str)
                 {
                     self.opened.push(picture.to_string());
@@ -1402,7 +1407,7 @@ pub(crate) mod tests {
         fn toolset_of(&self, id: &str) -> Option<Toolset> {
             match id {
                 "look" => Some(Toolset::Core),
-                "build_command_run" => Some(Toolset::Core),
+                "build_command_run" | PICTURE_TOOL => Some(Toolset::Core),
                 "danger" => Some(Toolset::Runtime),
                 _ => None,
             }
@@ -1417,8 +1422,9 @@ pub(crate) mod tests {
                     json!({"command": "cargo build", "exit_code": 0, "succeeded": input.get("ok").and_then(Value::as_bool) == Some(true)}),
                 ));
             }
-            // As build_file_read answers for a picture: named by its typed `picture` field.
-            if id == "look"
+            // As build_file_read answers for a picture: named by its typed `picture` field. `look`
+            // answers the same, as another tool might, and only build_file_read's is opened.
+            if (id == PICTURE_TOOL || id == "look")
                 && let Some(p) = input.get("picture").and_then(Value::as_str)
             {
                 return Ok(ToolOutput::Value(json!({"path": p, "picture": p, "media_type": "image/png", "note": "It's a picture."})));
@@ -1659,55 +1665,105 @@ pub(crate) mod tests {
         }
     }
 
+    /// A real picture, `w`×`h`, that decodes.
+    fn real_png(w: u32, h: u32) -> Vec<u8> {
+        use craft_anything_engine::tools::web_common::{Image, encode_png};
+        encode_png(&Image { width: w, height: h, rgba: vec![200; (w * h * 4) as usize] }).unwrap()
+    }
+
+    /// Runs one step whose tool calls are `calls` on a backend with `vision` and the project folder
+    /// `project`, and returns the next request's last message: every result, then what was opened.
+    fn after_a_step(vision: Vision, project: Option<&std::path::Path>, calls: Vec<Block>) -> Vec<Block> {
+        let host = Arc::new(FakeHost { calls: Mutex::default(), journal: Mutex::default() });
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let n = calls.len();
+        let script = Scripted {
+            turns: VecDeque::from([turn(calls, StopReason::ToolUse), turn(vec![Block::Text { text: "done".into() }], StopReason::EndTurn)]),
+            seen: seen.clone(),
+        };
+        let slot = ModelSlot {
+            name: "Local".into(),
+            model: Box::new(script),
+            local: true,
+            effort: None,
+            max_turns: 5,
+            context_tokens: 0,
+            tools: Default::default(),
+            vision,
+        };
+        let cfg = LoopConfig { project: project.map(std::path::Path::to_path_buf), ..LoopConfig::default() };
+        let mut c = ApiConversation::start(host, vec![slot], cfg).unwrap();
+        c.send("Look at your build.");
+        drain_until_done(&mut c, |_, _| {});
+        let seen = seen.lock().unwrap();
+        let after = seen[1].last().unwrap().blocks.clone();
+        assert!(after.iter().take(n).all(|b| matches!(b, Block::ToolResult { .. })), "every result comes first: {after:?}");
+        after
+    }
+
+    fn open(id: &str, tool: &str, picture: &str) -> Block {
+        Block::ToolUse { id: id.into(), name: tool.into(), input: json!({"picture": picture}) }
+    }
+
+    fn texts(blocks: &[Block]) -> String {
+        blocks.iter().filter_map(|b| if let Block::Text { text } = b { Some(text.as_str()) } else { None }).collect()
+    }
+
+    fn image_names(blocks: &[Block]) -> Vec<&str> {
+        blocks.iter().filter_map(|b| if let Block::Image { name, .. } = b { Some(name.as_str()) } else { None }).collect()
+    }
+
     #[test]
     fn a_picture_a_tool_opens_is_shown_after_its_result_to_a_model_that_sees() {
-        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join("app")).unwrap();
-        std::fs::write(project.path().join("app/shot.png"), png).unwrap();
+        std::fs::write(project.path().join("app/shot.png"), real_png(3, 2)).unwrap();
         for vision in [Vision::Yes, Vision::No] {
-            let host = Arc::new(FakeHost { calls: Mutex::default(), journal: Mutex::default() });
-            let seen = Arc::new(Mutex::new(Vec::new()));
-            let open = |id: &str, p: &str| Block::ToolUse { id: id.into(), name: "look".into(), input: json!({"picture": p}) };
-            let script = Scripted {
-                turns: VecDeque::from([
-                    turn(
-                        vec![open("a", "app/shot.png"), open("b", "app/gone.png"), Block::ToolUse { id: "c".into(), name: "look".into(), input: json!({}) }],
-                        StopReason::ToolUse,
-                    ),
-                    turn(vec![Block::Text { text: "done".into() }], StopReason::EndTurn),
-                ]),
-                seen: seen.clone(),
-            };
-            let slot = ModelSlot {
-                name: "Local".into(),
-                model: Box::new(script),
-                local: true,
-                effort: None,
-                max_turns: 5,
-                context_tokens: 0,
-                tools: Default::default(),
-                vision,
-            };
-            let cfg = LoopConfig { project: Some(project.path().to_path_buf()), ..LoopConfig::default() };
-            let mut c = ApiConversation::start(host, vec![slot], cfg).unwrap();
-            c.send("Look at your build.");
-            drain_until_done(&mut c, |_, _| {});
-            let seen = seen.lock().unwrap();
-            let after = &seen[1].last().unwrap().blocks;
-            // Every result first, then what the tools opened.
-            assert!(after.iter().take(3).all(|b| matches!(b, Block::ToolResult { .. })), "{vision:?}: {after:?}");
+            // Another tool's result with the same field opens nothing.
+            let calls = vec![open("a", PICTURE_TOOL, "app/shot.png"), open("b", PICTURE_TOOL, "app/gone.png"), open("c", "look", "app/shot.png")];
+            let after = after_a_step(vision, Some(project.path()), calls);
             let rest = &after[3..];
-            let text: String = rest.iter().filter_map(|b| if let Block::Text { text } = b { Some(text.as_str()) } else { None }).collect();
+            let text = texts(rest);
             if vision == Vision::Yes {
                 assert!(matches!(&rest[0], Block::Text { text } if text == "Picture: app/shot.png"), "{rest:?}");
-                assert!(matches!(&rest[1], Block::Image { name, .. } if name == "app/shot.png"), "{rest:?}");
+                let Block::Image { name, data, .. } = &rest[1] else { panic!("{rest:?}") };
+                assert_eq!(name, "app/shot.png");
+                // What's attached is the picture itself, whole: it decodes to its size.
+                let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).unwrap();
+                let decoded = craft_anything_engine::tools::web_common::decode_picture(&bytes).unwrap();
+                assert_eq!((decoded.width, decoded.height), (3, 2));
                 assert!(text.contains("[Couldn't show app/gone.png ("), "{text}");
+                assert_eq!(image_names(rest), ["app/shot.png"], "look's picture isn't opened: {rest:?}");
             } else {
-                assert!(!rest.iter().any(|b| matches!(b, Block::Image { .. })), "{rest:?}");
+                assert!(image_names(rest).is_empty(), "{rest:?}");
                 assert!(text.contains("[app/shot.png is a picture, but this model isn't shown pictures.]"), "{text}");
+                assert_eq!(text.matches("app/shot.png").count(), 1, "only build_file_read's is mentioned: {text}");
             }
         }
+    }
+
+    #[test]
+    fn a_step_opening_more_than_the_limit_shows_the_first_and_names_the_rest() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("app")).unwrap();
+        let names: Vec<String> = (0..MAX_PICTURES + 2).map(|i| format!("app/shot-{i}.png")).collect();
+        for n in &names {
+            std::fs::write(project.path().join(n), real_png(2, 2)).unwrap();
+        }
+        let calls = names.iter().enumerate().map(|(i, n)| open(&format!("c{i}"), PICTURE_TOOL, n)).collect();
+        let after = after_a_step(Vision::Yes, Some(project.path()), calls);
+        let rest = &after[names.len()..];
+        assert_eq!(image_names(rest), names[..MAX_PICTURES].iter().map(String::as_str).collect::<Vec<_>>());
+        let text = texts(rest);
+        let left = names[MAX_PICTURES..].join(", ");
+        assert!(text.contains(&format!("[Not shown: {left} (at most {MAX_PICTURES} pictures a step); open them in the next.]")), "{text}");
+    }
+
+    #[test]
+    fn a_picture_opened_without_a_project_folder_is_named_not_read() {
+        let after = after_a_step(Vision::Yes, None, vec![open("a", PICTURE_TOOL, "app/shot.png")]);
+        assert!(image_names(&after).is_empty(), "{after:?}");
+        assert!(texts(&after[1..]).contains("[app/shot.png is a picture, but pictures can't be shown here.]"), "{after:?}");
     }
 
     #[test]
@@ -1735,9 +1791,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_build_tool_the_limit_counts_exists() {
+    fn the_tools_the_loop_reads_results_of_exist() {
         let e = craft_anything_engine::Engine::new(craft_anything_engine::testing::session());
         assert!(e.registry().get(BUILD_COMMAND_TOOL).is_some_and(|s| !s.effects.is_empty()));
+        assert!(e.registry().get(PICTURE_TOOL).is_some(), "the tool whose pictures are opened");
     }
 
     /// A long conversation is summarised, saved after every message, and resumed in its mode.

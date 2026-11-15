@@ -108,9 +108,9 @@ const MAX_SOURCE_BYTES: u64 = 64_000_000;
 
 /// Read pictures (project-relative paths) as image blocks named by their path. One larger than
 /// [`MAX_IMAGE_BYTES`], or longer than [`MAX_SIDE`] on a side, is shrunk to fit, and its name
-/// says at what scale it's shown, so sizes
-/// read off it can be scaled back. Those that can't be shown (missing, not a picture, too large
-/// to read) come back with why, to be said.
+/// says at what scale it's shown, so sizes read off it can be scaled back. Only a file really
+/// inside `root` is read (see [`inside`]), whoever named it. Those that can't be shown (missing,
+/// outside the project, not a picture, too large to read) come back with why, to be said.
 pub(crate) fn load(root: &Path, paths: &[PathBuf]) -> (Vec<Block>, Vec<String>) {
     load_within(root, paths, MAX_IMAGE_BYTES)
 }
@@ -121,8 +121,9 @@ fn load_within(root: &Path, paths: &[PathBuf], max: usize) -> (Vec<Block>, Vec<S
     for rel in paths {
         let mut name = rel.display().to_string().replace('\\', "/");
         let mut bytes = Vec::new();
-        let read = std::fs::File::open(root.join(rel)).and_then(|f| f.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes));
-        let fitted = read.map_err(|e| e.to_string()).and_then(|_| {
+        let read = inside(root, rel)
+            .and_then(|path| std::fs::File::open(path).and_then(|f| f.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes)).map_err(|e| e.to_string()));
+        let fitted = read.and_then(|_| {
             if bytes.len() as u64 > MAX_SOURCE_BYTES {
                 return Err(format!("larger than the {} MB read to be shrunk", MAX_SOURCE_BYTES / 1_000_000));
             }
@@ -139,6 +140,20 @@ fn load_within(root: &Path, paths: &[PathBuf], max: usize) -> (Vec<Block>, Vec<S
         }
     }
     (shown, skipped)
+}
+
+/// Where `rel` really is, if that's inside the project folder `root`: a path that's absolute or
+/// climbs out (`..`) is refused as written, and one that resolves outside (through a link in the
+/// project to somewhere else) is refused once resolved. The resolved path is what's read.
+fn inside(root: &Path, rel: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    const OUTSIDE: &str = "outside the project";
+    if !rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
+        return Err(OUTSIDE.into());
+    }
+    let root = root.canonicalize().map_err(|e| format!("the project folder: {e}"))?;
+    let path = root.join(rel).canonicalize().map_err(|e| e.to_string())?;
+    if path.starts_with(&root) { Ok(path) } else { Err(format!("{OUTSIDE}, through a link")) }
 }
 
 /// A picture's bytes as they'll be shown, and how it was shrunk to fit, if it was.
@@ -410,5 +425,51 @@ mod tests {
         assert!(skipped.is_empty(), "{skipped:?}");
         let Some(Block::Image { name, .. }) = shown.first() else { panic!("{shown:?}") };
         assert!(name.starts_with("capture/screenshot-3840.png (shown at ") && name.ends_with(" of 300×200 px)"), "{name}");
+    }
+
+    #[test]
+    fn only_a_picture_inside_the_project_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, outside) = (dir.path().join("project"), dir.path().join("elsewhere"));
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let png = noise_png(4, 4);
+        std::fs::write(root.join("app/in.png"), &png).unwrap();
+        std::fs::write(outside.join("secret.png"), &png).unwrap();
+        let absolute = outside.join("secret.png");
+        let asked = [
+            PathBuf::from("app/in.png"),
+            PathBuf::from("./app/in.png"),
+            PathBuf::from("../elsewhere/secret.png"),
+            PathBuf::from("app/../../elsewhere/secret.png"),
+            absolute,
+        ];
+        let (shown, skipped) = load(&root, &asked);
+        let names: Vec<&str> = shown.iter().filter_map(|b| if let Block::Image { name, .. } = b { Some(name.as_str()) } else { None }).collect();
+        assert_eq!(names, ["app/in.png", "./app/in.png"]);
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        assert!(skipped.iter().all(|s| s.ends_with("(outside the project)")), "{skipped:?}");
+    }
+
+    /// A link in the project is followed only as far as the project: one to a picture elsewhere
+    /// isn't read, one to a picture in the project is.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_project_isnt_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, outside) = (dir.path().join("project"), dir.path().join("elsewhere"));
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let png = noise_png(4, 4);
+        std::fs::write(outside.join("secret.png"), &png).unwrap();
+        std::fs::write(root.join("app/real.png"), &png).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.png"), root.join("app/out.png")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("app/away")).unwrap();
+        std::os::unix::fs::symlink(root.join("app/real.png"), root.join("app/alias.png")).unwrap();
+        let asked = [PathBuf::from("app/out.png"), PathBuf::from("app/away/secret.png"), PathBuf::from("app/alias.png")];
+        let (shown, skipped) = load(&root, &asked);
+        let names: Vec<&str> = shown.iter().filter_map(|b| if let Block::Image { name, .. } = b { Some(name.as_str()) } else { None }).collect();
+        assert_eq!(names, ["app/alias.png"]);
+        assert_eq!(skipped, ["app/out.png (outside the project, through a link)", "app/away/secret.png (outside the project, through a link)"]);
     }
 }

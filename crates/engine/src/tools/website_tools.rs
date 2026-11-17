@@ -503,6 +503,9 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
     }
     set_viewport(client, width, height, dl)?;
     let mut seen: Vec<CdpEvent> = Vec::new();
+    // What came before is the previous page's (its own load finishing, its errors): only this
+    // navigation's events are read, so an earlier load event can't end the wait early.
+    let _ = client.take_events();
     let r = match client.call("Page.navigate", json!({"url": url}), None, dl) {
         // The question came before the browser said the navigation started.
         Err(_) if client.waiting_dialog().is_some() => Value::Null,

@@ -132,6 +132,9 @@ cheapest help we can give anyone, so nothing below should hold it up for long.
 - [x] A start that dies before its window (a native driver crash leaves no dialog or log, #74, #104,
       #33) is remembered: `starting` beside `desktop.log` is written before the window is asked for
       and removed once it's open, and a start that finds it draws with WARP that once
+- [x] List `craft-anything-cli` in AppStream metainfo `<provides>` so package managers and software
+      centres know the CLI ships with the package (it is inside the AppImage and Flatpak but not on
+      the host's PATH)
       (`apps/craft-anything/src/start_guard.rs`)
 - [x] Live-check the start fallback on Windows: make a start die before its window (kill the
       process at launch), start again, and see `desktop.log` say it drew without the graphics card

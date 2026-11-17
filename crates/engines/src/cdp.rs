@@ -587,6 +587,8 @@ pub struct CdpClient {
     dialogs: Dialogs,
     /// The `confirm` or `prompt` the page is waiting on, held for the caller ([`Dialogs::Notices`]).
     waiting: Option<Value>,
+    /// How many questions have been held, so a call can tell a new one from the one it answers.
+    questions: u64,
 }
 
 /// Which of a page's own dialogs a client answers by itself.
@@ -634,7 +636,7 @@ pub struct CdpEvent {
 
 impl CdpClient {
     pub fn new(conn: WsConn) -> Self {
-        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0, dialogs: Dialogs::Left, waiting: None }
+        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0, dialogs: Dialogs::Left, waiting: None, questions: 0 }
     }
 
     /// Answer every dialog the page opens by itself ([`dialog_answer`]) as soon as it's seen, so a
@@ -676,6 +678,7 @@ impl CdpClient {
             Some(DIALOG_CLOSED) => self.waiting = None,
             Some(DIALOG_OPENING) if self.dialogs == Dialogs::Notices && !is_notice(&v["params"]) => {
                 self.waiting = Some(v["params"].clone());
+                self.questions = self.questions.wrapping_add(1);
             }
             _ => {}
         }
@@ -716,6 +719,7 @@ impl CdpClient {
         {
             return Err(dialog_waiting(d));
         }
+        let asked_before = self.questions;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let mut msg = json!({"id": id, "method": method, "params": params});
@@ -749,7 +753,11 @@ impl CdpClient {
             // Anything else is an event or a reply to a different id: keep events, ignore stray replies.
             if v.get("method").is_some() {
                 self.on_event(v);
-                if let Some(d) = &self.waiting {
+                // Only a question asked during this call stops it: the answer to the one already
+                // held waits for its own reply.
+                if self.questions != asked_before
+                    && let Some(d) = &self.waiting
+                {
                     return Err(dialog_waiting(d));
                 }
             }
@@ -887,6 +895,94 @@ mod tests {
         assert_eq!(answer(json!("prompt")), json!(false));
         assert_eq!(answer(json!("something-new")), json!(false), "an unknown kind is dismissed");
         assert_eq!(answer(Value::Null), json!(false));
+    }
+
+    /// A stand-in page over a real WebSocket: `script` runs on the server side of the connection.
+    fn stand_in(script: impl FnOnce(&mut TcpStream) + Send + 'static) -> CdpClient {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while find(&head, b"\r\n\r\n").is_none() && s.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let text = String::from_utf8_lossy(&head).into_owned();
+            let key = text.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")).unwrap_or_default().trim().to_string();
+            let reply = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                expected_accept(&key)
+            );
+            s.write_all(reply.as_bytes()).unwrap();
+            script(&mut s);
+        });
+        let ep = parse_endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
+        let target = ws_target(&format!("ws://127.0.0.1:{port}/devtools/page/P"), &ep).unwrap();
+        CdpClient::new(WsConn::connect(&target, 1 << 20, &Deadline::new(Duration::from_secs(5), CancelToken::default())).unwrap())
+    }
+
+    /// Send one unmasked text frame, as a browser does.
+    fn send(s: &mut TcpStream, v: Value) {
+        let body = v.to_string().into_bytes();
+        let mut frame = vec![0x81u8];
+        if body.len() < 126 {
+            frame.push(body.len() as u8);
+        } else {
+            frame.push(126);
+            frame.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        }
+        frame.extend_from_slice(&body);
+        s.write_all(&frame).unwrap();
+    }
+
+    /// Read one masked client frame's JSON.
+    fn receive(s: &mut TcpStream) -> Value {
+        let mut h = [0u8; 2];
+        s.read_exact(&mut h).unwrap();
+        let mut len = usize::from(h[1] & 0x7f);
+        if len == 126 {
+            let mut l = [0u8; 2];
+            s.read_exact(&mut l).unwrap();
+            len = usize::from(u16::from_be_bytes(l));
+        }
+        let mut mask = [0u8; 4];
+        s.read_exact(&mut mask).unwrap();
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body).unwrap();
+        for (i, byte) in body.iter_mut().enumerate() {
+            *byte ^= mask[i % 4];
+        }
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn an_answer_waits_for_its_reply_and_a_new_question_stops_a_call() {
+        let mut client = stand_in(|s| {
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            // The answer: an unrelated event comes first, then its reply.
+            let answer = receive(s);
+            assert_eq!(answer["method"], "Page.handleJavaScriptDialog");
+            send(s, json!({"method": "Network.requestWillBeSent", "params": {"requestId": "1"}}));
+            send(s, json!({"id": answer["id"], "result": {}}));
+            // A call the page interrupts with a new question gets no reply.
+            let _evaluate = receive(s);
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": "Sales"}}));
+            let _ = receive(s);
+        })
+        .answering_notices();
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("confirm")), "the question is held, not answered");
+        let refused = client.call("Runtime.evaluate", json!({}), None, &dl).unwrap_err();
+        assert!(refused.message.contains("waiting for an answer"), "nothing else runs meanwhile: {}", refused.message);
+        client.call("Page.handleJavaScriptDialog", json!({"accept": true}), None, &dl).unwrap();
+        assert!(client.waiting_dialog().is_none(), "answered");
+        let started = Instant::now();
+        let stopped = client.call("Runtime.evaluate", json!({}), None, &dl).unwrap_err();
+        assert_eq!(stopped.details.as_ref().map(|d| d[DIALOG_DETAIL]["type"].clone()), Some(json!("prompt")));
+        assert!(started.elapsed() < Duration::from_secs(2), "at once, not at the deadline");
     }
 
     #[test]

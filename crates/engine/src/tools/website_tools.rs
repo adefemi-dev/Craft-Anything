@@ -523,14 +523,16 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
 /// settle, keeping the events [`page_health`] reads. A question the page asks ends the wait.
 fn wait_for_page(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
     let loaded = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
-    let mut done = false;
     let mut keep = |events: Vec<CdpEvent>| {
         let wanted = events.into_iter().filter(|e| {
             e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING
         });
         seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
     };
-    keep(client.take_events());
+    // A load that finished while Page.navigate was answered is in the queue already.
+    let queued = client.take_events();
+    let mut done = queued.iter().any(|e| e.method == "Page.loadEventFired");
+    keep(queued);
     while !done && client.waiting_dialog().is_none() && !loaded.expired() && !dl.expired() {
         let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
         client.pump_until(&slice)?;
@@ -1257,7 +1259,11 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     if let Some(w) = p.widths.first() {
         let _ = set_viewport(&mut client, *w, 900, &dl);
     }
-    cleanup(&mut client, &dl);
+    // A question the resize made the page ask is kept for the answer; the next tool says so.
+    match client.waiting_dialog().map(dialog_open) {
+        Some(open) => hold(&site, open, client),
+        None => cleanup(&mut client, &dl),
+    }
     let (mut blueprint, shots, html) = r;
     let html_bytes = html.0;
     if visitor {

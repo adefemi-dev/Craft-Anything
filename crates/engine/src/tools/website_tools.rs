@@ -501,11 +501,20 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
     for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
         let _ = client.call(domain, json!({}), None, dl);
     }
-    set_viewport(client, width, height, dl)?;
+    match set_viewport(client, width, height, dl) {
+        // The previous page asked something as it was resized: answered below, then navigated.
+        Err(_) if client.waiting_dialog().is_some() => {}
+        r => r?,
+    }
     let mut seen: Vec<CdpEvent> = Vec::new();
     // What came before is the previous page's (its own load finishing, its errors): only this
     // navigation's events are read, so an earlier load event can't end the wait early.
     let _ = client.take_events();
+    // A question the previous page asked during setup is left unanswered, as a visitor typing an
+    // address does; otherwise the navigation would never be sent.
+    if client.waiting_dialog().is_some() {
+        client.call("Page.handleJavaScriptDialog", json!({"accept": false}), None, dl)?;
+    }
     let r = match client.call("Page.navigate", json!({"url": url}), None, dl) {
         // The question came before the browser said the navigation started.
         Err(_) if client.waiting_dialog().is_some() => Value::Null,

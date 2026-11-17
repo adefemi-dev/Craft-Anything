@@ -3588,6 +3588,9 @@ Owner: open · Status: in progress
       declared secrets redacted where the tool has hidden values. Fake-CDP regressions cover all
       four
       — claimed: AlexJoaquimPereira, branch bugfix/r3.13-remaining-page-dialogs
+- [ ] Let the agent answer a page's `confirm` or `prompt` (#2018): `web_site_open` and
+      `web_site_capture` report the question instead of dismissing it, and a new
+      `web_page_dialog_answer` answers it. — claimed: htcom-code, branch feature/r3.13-page-dialog-answer
 
 ---
 

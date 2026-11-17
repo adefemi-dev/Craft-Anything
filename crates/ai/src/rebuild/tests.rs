@@ -2536,6 +2536,7 @@ mod picking_up_a_build {
             // A note waiting when the first turn ends, with a picture, and one from outside the
             // project, which is never named to the model.
             let outside = b._dir.path().join("elsewhere.png");
+            std::fs::write(&outside, PNG).unwrap();
             worker.notes.lock().unwrap().push(Note {
                 id: 7,
                 text: "Make the header like this.".into(),

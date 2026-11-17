@@ -584,7 +584,33 @@ pub struct CdpClient {
     events: VecDeque<Value>,
     max_events: usize,
     dropped_events: u64,
-    answer_dialogs: bool,
+    dialogs: Dialogs,
+    /// The `confirm` or `prompt` the page is waiting on, held for the caller ([`Dialogs::Notices`]).
+    waiting: Option<Value>,
+}
+
+/// Which of a page's own dialogs a client answers by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dialogs {
+    /// None: a person (or nobody) answers them.
+    Left,
+    /// `alert` and leave-page questions; a `confirm` or `prompt` is held for the caller.
+    Notices,
+    /// Every dialog, by [`dialog_answer`].
+    All,
+}
+
+/// The event that says a page's dialog went away (answered by us, by a person or by the page).
+pub const DIALOG_CLOSED: &str = "Page.javascriptDialogClosed";
+
+/// The key in a [`ToolError`]'s details that carries the dialog a call stopped at: the
+/// [`DIALOG_OPENING`] params (`type`, `message`, `defaultPrompt`, `url`).
+pub const DIALOG_DETAIL: &str = "dialog_open";
+
+/// Whether a dialog only tells the visitor something, so its one answer can be given without
+/// asking anyone: an `alert` (OK) or a leave-page question (going on with the navigation).
+pub fn is_notice(opening: &Value) -> bool {
+    matches!(opening.get("type").and_then(Value::as_str), Some("alert" | "beforeunload"))
 }
 
 /// The event a page's `alert`, `confirm`, `prompt` or leave-page question raises. Until it's
@@ -595,8 +621,7 @@ pub const DIALOG_OPENING: &str = "Page.javascriptDialogOpening";
 /// closed and a leave-page question lets the page go (what a visitor's only click would do), while
 /// a `confirm` or `prompt` is dismissed, so nothing the page asks to do is agreed to on our behalf.
 pub fn dialog_answer(opening: &Value) -> Value {
-    let accept = matches!(opening.get("type").and_then(Value::as_str), Some("alert" | "beforeunload"));
-    json!({"accept": accept})
+    json!({"accept": is_notice(opening)})
 }
 
 /// A CDP event: domain-qualified method and its params.
@@ -609,7 +634,7 @@ pub struct CdpEvent {
 
 impl CdpClient {
     pub fn new(conn: WsConn) -> Self {
-        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0, answer_dialogs: false }
+        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0, dialogs: Dialogs::Left, waiting: None }
     }
 
     /// Answer every dialog the page opens by itself ([`dialog_answer`]) as soon as it's seen, so a
@@ -617,8 +642,28 @@ impl CdpClient {
     /// deadline. The [`DIALOG_OPENING`] events stay in the queue for the caller to report.
     /// Needs `Page.enable` on the session; leave it off where a person answers the page.
     pub fn answering_dialogs(mut self) -> Self {
-        self.answer_dialogs = true;
+        self.dialogs = Dialogs::All;
         self
+    }
+
+    /// Answer only the dialogs that have one answer ([`is_notice`]); hold a `confirm` or `prompt`
+    /// for the caller to decide. While one is open the page's scripts wait, so a call that is
+    /// waiting for its reply when it opens ends at once with an error carrying it in its details
+    /// ([`DIALOG_DETAIL`]), and [`Self::waiting_dialog`] says what it asks until it closes.
+    pub fn answering_notices(mut self) -> Self {
+        self.dialogs = Dialogs::Notices;
+        self
+    }
+
+    /// The `confirm` or `prompt` this page is waiting on ([`Self::answering_notices`]): its
+    /// [`DIALOG_OPENING`] params, until a [`DIALOG_CLOSED`] event is seen.
+    pub fn waiting_dialog(&self) -> Option<&Value> {
+        self.waiting.as_ref()
+    }
+
+    /// Whether this client dismisses a `confirm` or `prompt` itself ([`Self::answering_dialogs`]).
+    pub fn dismisses_questions(&self) -> bool {
+        self.dialogs == Dialogs::All
     }
 
     pub fn dropped_events(&self) -> u64 {
@@ -627,7 +672,19 @@ impl CdpClient {
 
     /// Keep an event, answering it first when it's a dialog this client answers.
     fn on_event(&mut self, v: Value) {
-        if self.answer_dialogs && v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) {
+        match v.get("method").and_then(Value::as_str) {
+            Some(DIALOG_CLOSED) => self.waiting = None,
+            Some(DIALOG_OPENING) if self.dialogs == Dialogs::Notices && !is_notice(&v["params"]) => {
+                self.waiting = Some(v["params"].clone());
+            }
+            _ => {}
+        }
+        let answers = match self.dialogs {
+            Dialogs::Left => false,
+            Dialogs::Notices => is_notice(&v["params"]),
+            Dialogs::All => true,
+        };
+        if answers && v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) {
             let id = self.next_id;
             self.next_id = self.next_id.wrapping_add(1);
             let mut msg = json!({"id": id, "method": "Page.handleJavaScriptDialog", "params": dialog_answer(&v["params"])});
@@ -653,6 +710,12 @@ impl CdpClient {
 
     /// Send a command and wait for its reply, dispatching any events seen meanwhile into the queue.
     pub fn call(&mut self, method: &str, params: Value, session_id: Option<&str>, dl: &Deadline) -> Result<Value, ToolError> {
+        // A page waiting on a question doesn't run anything else; only the answer gets through.
+        if method != "Page.handleJavaScriptDialog"
+            && let Some(d) = &self.waiting
+        {
+            return Err(dialog_waiting(d));
+        }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let mut msg = json!({"id": id, "method": method, "params": params});
@@ -677,11 +740,18 @@ impl CdpClient {
                     let m = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
                     return Err(cdp_error(method, m).with_details(json!({"error": err})));
                 }
+                // Answered: the page goes on, even before its closed event arrives.
+                if method == "Page.handleJavaScriptDialog" {
+                    self.waiting = None;
+                }
                 return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
             // Anything else is an event or a reply to a different id: keep events, ignore stray replies.
             if v.get("method").is_some() {
                 self.on_event(v);
+                if let Some(d) = &self.waiting {
+                    return Err(dialog_waiting(d));
+                }
             }
         }
     }
@@ -724,6 +794,16 @@ impl CdpClient {
     pub fn close(&mut self, dl: &Deadline) {
         self.conn.close(dl);
     }
+}
+
+/// The error for a call the page can't answer because it's waiting on a `confirm` or `prompt`.
+fn dialog_waiting(opening: &Value) -> ToolError {
+    let kind = opening.get("type").and_then(Value::as_str).unwrap_or("dialog");
+    let message = opening.get("message").and_then(Value::as_str).unwrap_or_default();
+    let first = message.lines().next().unwrap_or_default().chars().take(300).collect::<String>();
+    ToolError::new(ErrorCode::ProgramFailed, format!("the page is waiting for an answer to its {kind} (\"{first}\")"))
+        .with_remediation("Answer the page's question first; nothing else runs in the page until it's answered.")
+        .with_details(json!({ DIALOG_DETAIL: opening }))
 }
 
 fn cdp_error(method: &str, message: &str) -> ToolError {
@@ -807,5 +887,15 @@ mod tests {
         assert_eq!(answer(json!("prompt")), json!(false));
         assert_eq!(answer(json!("something-new")), json!(false), "an unknown kind is dismissed");
         assert_eq!(answer(Value::Null), json!(false));
+    }
+
+    #[test]
+    fn only_a_notice_is_answered_without_asking() {
+        let is = |kind: &str| is_notice(&json!({"type": kind}));
+        assert!(is("alert") && is("beforeunload"));
+        assert!(!is("confirm") && !is("prompt") && !is("something-new") && !is_notice(&Value::Null));
+        let e = dialog_waiting(&json!({"type": "confirm", "message": "Continue to the new version?\nmore", "defaultPrompt": ""}));
+        assert_eq!(e.message, "the page is waiting for an answer to its confirm (\"Continue to the new version?\")");
+        assert_eq!(e.details.as_ref().and_then(|d| d[DIALOG_DETAIL]["type"].as_str()), Some("confirm"), "the question travels with the error");
     }
 }

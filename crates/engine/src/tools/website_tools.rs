@@ -14,7 +14,9 @@ use super::site_sign_in;
 use super::web_common::{self, Browser, LaunchOptions, ProfileChoice};
 use crate::tool::{Caller, Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
 use craft_anything_engines::cdp::{self, CdpClient, CdpEvent, Deadline, Endpoint, PAGE_MAX_MESSAGE};
-use craft_anything_evidence::{Authority, Confidence, Coverage, ErrorCode, EvidenceBuilder, Limitation, Location, Subject, ToolError, sha256_hex};
+use craft_anything_evidence::{
+    Authority, Confidence, Coverage, CoverageStatus, ErrorCode, EvidenceBuilder, Limitation, Location, Subject, ToolError, sha256_hex,
+};
 use craft_anything_platform::sync::Mutex;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -63,6 +65,17 @@ pub fn specs() -> Vec<ToolSpec> {
             web_page_states_capture,
         ),
         spec(
+            DIALOG_ANSWER_TOOL,
+            "Answer a page's question",
+            "Answer the confirm or prompt the open website is waiting on (web_site_open and web_site_capture report one as dialog_open; nothing in the page runs until it's answered): accept: true agrees (OK), false dismisses (Cancel); prompt_text is typed into a prompt before it's accepted and is never kept. Then waits for the page to settle and reports where it ended up, including the next question if it asks one. Agreeing lets the site do what it asked, so it needs your approval.",
+            "Click OK or Cancel on a question the website is asking.",
+            Toolset::Browser,
+            Effects::EVIDENCE.union(Effects::EXECUTES_FOREIGN_CODE).union(Effects::ACCESSES_NETWORK).union(Effects::MUTATES_SESSION),
+            Requires::Engine("chromium"),
+            schema_of::<DialogAnswerParams>,
+            web_page_dialog_answer,
+        ),
+        spec(
             "web_site_close",
             "Close the website",
             "Close the private browser started by web_site_open and delete its temporary profile.",
@@ -85,6 +98,9 @@ pub struct SiteBrowser {
     pub url: Mutex<String>,
     /// What went wrong while the last page opened ([`page_health`]); web_site_capture records it.
     pub health: Mutex<Value>,
+    /// The `confirm` or `prompt` the page is waiting on, with the connection that saw it open:
+    /// set by the tool that saw it, taken by web_page_dialog_answer or the next web_site_open.
+    held: Mutex<Option<HeldDialog>>,
     /// The site key whose saved sign-in this browser started with; `None`: a fresh private profile.
     pub signed_in: Option<String>,
     /// Revision of the saved profile copied at launch; `None` for a fresh profile.
@@ -188,6 +204,7 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
                 version: b.version.clone(),
                 url: Mutex::new(String::new()),
                 health: Mutex::new(Value::Null),
+                held: Mutex::new(None),
                 signed_in: want.clone(),
                 sign_in_revision: revision,
                 _owner: Mutex::new(b),
@@ -198,10 +215,19 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     };
     drop(reservation);
     ctx.report(None, format!("Loading {url}…"));
+    // Opening another page is leaving a question unanswered, as a visitor typing an address does.
+    release_held(&site);
     let mut client = page_client(&site, &dl)?;
-    let r = navigate(&mut client, &url, p.width, p.height, p.settle_ms, &dl).and_then(|health| Ok((health, page_facts(&mut client, &dl)?)));
-    cleanup(&mut client, &dl);
-    let (health, facts) = r?;
+    // A page waiting on a question can't be read: its facts wait for the answer.
+    let r = navigate(&mut client, &url, p.width, p.height, p.settle_ms, &dl)
+        .and_then(|health| Ok((health.get("dialog_open").is_none().then(|| page_facts(&mut client, &dl)).transpose()?, health)));
+    let waiting = client.waiting_dialog().map(dialog_open);
+    match &waiting {
+        Some(open) => hold(&site, open.clone(), client),
+        None => cleanup(&mut client, &dl),
+    }
+    let (facts, health) = r?;
+    let facts = facts.unwrap_or(Value::Null);
     let final_url = facts.get("url").and_then(Value::as_str).unwrap_or(&url).to_string();
     if let Ok(mut u) = site.url.lock() {
         u.clone_from(&final_url);
@@ -230,30 +256,142 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         (0, 0) => opened,
         (e, f) => format!("{opened} While loading: {e} error(s), {f} failed request(s)."),
     };
-    let summary = format!("{summary}{}", dialogs_said(&dialogs));
+    let summary = format!("{summary}{}{}", dialogs_said(&dialogs), waiting.as_ref().map(dialog_waiting_said).unwrap_or_default());
     // Pages opened signed in often land on addresses carrying codes or tokens: keep only the path.
     let (final_url, facts) = if want.is_some() { signed_in_urls(final_url, facts) } else { (final_url, facts) };
     let browser = site.handle();
-    let ev = EvidenceBuilder::new(
+    let mut ev = EvidenceBuilder::new(
         "web_site_open",
         Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) },
         browser_env(ctx.session.clean_room(), &browser),
     )
     .params(json!({"url": shown, "width": p.width, "height": p.height}))
-    .result(json!({"url": final_url, "title": title, "facts": facts, "health": health, "dialogs": dialogs, "browser": site.product, "signed_in": want.is_some(), "signed_in_site": want}))
+    .result(json!({"url": final_url, "title": title, "facts": facts, "health": health, "dialogs": dialogs, "dialog_open": waiting, "browser": site.product, "signed_in": want.is_some(), "signed_in_site": want}))
     .summary(summary)
     .confidence(Confidence::Observed)
     .authority(Authority::OurRun)
     .limitation(profile_limitation(want.as_deref()))
-    .coverage(Coverage::complete(1))
-    .location(Location::new("url", shown))
-    .build()?;
-    Ok(ToolOutput::evidence(ev))
+    .location(Location::new("url", shown));
+    ev = match &waiting {
+        Some(_) => {
+            ev.limitation(waiting_limitation()).coverage(Coverage { status: CoverageStatus::Partial, examined: Some(0), total: Some(1), next_offset: None })
+        }
+        None => ev.coverage(Coverage::complete(1)),
+    };
+    Ok(ToolOutput::evidence(ev.build()?))
+}
+
+/// A question the page is waiting on, kept with the connection that saw it open. Only that
+/// connection can answer it: Chrome tells a new one there's no dialog, and doesn't answer its
+/// `Page.enable` while the question is open.
+struct HeldDialog {
+    /// [`dialog_open`]: what it asks.
+    open: Value,
+    client: CdpClient,
+}
+
+/// The question the open website's page is waiting on, if any.
+fn held_dialog(site: &SiteBrowser) -> Option<Value> {
+    site.held.lock().ok().and_then(|h| h.as_ref().map(|h| h.open.clone()))
+}
+
+/// Keep `client` until the question it saw is answered.
+fn hold(site: &SiteBrowser, open: Value, client: CdpClient) {
+    let old = site.held.lock().ok().and_then(|mut h| h.replace(HeldDialog { open, client }));
+    if let Some(old) = old {
+        dismiss(old);
+    }
+}
+
+fn take_held(site: &SiteBrowser) -> Option<HeldDialog> {
+    site.held.lock().ok().and_then(|mut h| h.take())
+}
+
+/// Dismiss a held question, as a visitor who leaves the page does.
+fn release_held(site: &SiteBrowser) {
+    if let Some(h) = take_held(site) {
+        dismiss(h);
+    }
+}
+
+/// Answer "no" and close the connection: one closed with the question still open would leave the
+/// page stuck, with nothing left that can answer it.
+fn dismiss(mut held: HeldDialog) {
+    let quick = Deadline::new(Duration::from_secs(5), crate::tool::CancelToken::default());
+    let _ = held.client.call("Page.handleJavaScriptDialog", json!({"accept": false}), None, &quick);
+    cleanup(&mut held.client, &quick);
+}
+
+/// What a page's `confirm` or `prompt` asks, as kept and shown: its kind, first line and default
+/// answer (a prompt's), never anything typed into it.
+pub(crate) fn dialog_open(opening: &Value) -> Value {
+    let line = opening.get("message").and_then(Value::as_str).unwrap_or_default().lines().next().unwrap_or_default().chars().take(300).collect::<String>();
+    let mut d = json!({"type": opening["type"], "message": line});
+    if opening["type"] == "prompt"
+        && let Some(o) = d.as_object_mut()
+    {
+        o.insert(
+            "default_prompt".into(),
+            json!(opening.get("defaultPrompt").and_then(Value::as_str).unwrap_or_default().chars().take(300).collect::<String>()),
+        );
+    }
+    d
+}
+
+/// The summary's sentence on a question the page is waiting on.
+fn dialog_waiting_said(open: &Value) -> String {
+    let kind = if open["type"] == "prompt" { "a prompt" } else { "a confirm question" };
+    format!(
+        " The page is waiting for an answer to {kind} (\"{}\"): nothing in it can be read until it's answered. Answer it with {DIALOG_ANSWER_TOOL} (accept: true agrees, false dismisses).",
+        open["message"].as_str().unwrap_or_default()
+    )
+}
+
+fn waiting_limitation() -> Limitation {
+    Limitation::new(
+        "dialog_waiting",
+        format!("The page is waiting on a question it asked; its title, size and contents weren't read. Answer it with {DIALOG_ANSWER_TOOL}."),
+    )
+}
+
+/// Finish with a tool's client: when the page stopped it with a question, keep the client for the
+/// answer and say what the page asks and how to answer it; otherwise close it and pass `e` on.
+fn end_with(site: &SiteBrowser, mut client: CdpClient, e: ToolError, dl: &Deadline) -> ToolError {
+    match client.waiting_dialog().map(dialog_open) {
+        Some(open) => {
+            hold(site, open.clone(), client);
+            dialog_refusal(&open)
+        }
+        None => {
+            cleanup(&mut client, dl);
+            e
+        }
+    }
+}
+
+fn dialog_refusal(open: &Value) -> ToolError {
+    ToolError::new(
+        ErrorCode::ProgramFailed,
+        format!(
+            "The page is waiting for an answer to its {} (\"{}\"), so nothing in it can be read.",
+            open["type"].as_str().unwrap_or("dialog"),
+            open["message"].as_str().unwrap_or_default()
+        ),
+    )
+    .with_remediation(format!("Answer it with {DIALOG_ANSWER_TOOL} (accept: true agrees, false dismisses), then run this again."))
+    .with_details(json!({ cdp::DIALOG_DETAIL: open }))
+}
+
+/// Refuse to start on a page that is waiting on a question.
+pub(crate) fn refuse_if_waiting(site: &SiteBrowser) -> Result<(), ToolError> {
+    held_dialog(site).map_or(Ok(()), |open| Err(dialog_refusal(&open)))
 }
 
 /// The summary's sentence on dialogs the page opened by itself while it loaded (empty when none).
 fn dialogs_said(dialogs: &Value) -> String {
-    web_common::dialogs_said_in(dialogs)
+    // The one still waiting has its own sentence (dialog_waiting_said).
+    let answered: Vec<Value> = dialogs.as_array().into_iter().flatten().filter(|d| d["answered"] != "waiting").cloned().collect();
+    web_common::dialogs_said(&answered)
 }
 
 /// Explicit signed-out opens must discard even a matching browser's accumulated state.
@@ -326,12 +464,24 @@ fn open_site(ctx: &mut Ctx<'_>, dl: &Deadline) -> Result<Arc<SiteBrowser>, ToolE
     })
 }
 
+/// A client for the open website's page. Nobody sits at this private browser, so a page's own
+/// `alert` would hold it until the deadline: notices are answered at once. A `confirm` or `prompt`
+/// is a real question, so it's held for the agent (web_page_dialog_answer).
 fn page_client(site: &SiteBrowser, dl: &Deadline) -> Result<CdpClient, ToolError> {
+    connect_page(site, dl).map(CdpClient::answering_notices)
+}
+
+/// A client that also dismisses a `confirm` or `prompt`: for clicks of our own
+/// (web_page_states_capture), which never agree to what a control asks.
+fn page_client_dismissing(site: &SiteBrowser, dl: &Deadline) -> Result<CdpClient, ToolError> {
+    connect_page(site, dl).map(CdpClient::answering_dialogs)
+}
+
+fn connect_page(site: &SiteBrowser, dl: &Deadline) -> Result<CdpClient, ToolError> {
     let b = site.handle();
     let targets = cdp::json_list(&site.endpoint, dl)?;
     let target = web_common::pick_target(&targets, None, Some("page"))?;
-    // Nobody sits at this private browser, so a page's own alert would hold it until the deadline.
-    web_common::connect_target(&b, target, PAGE_MAX_MESSAGE, dl).map(CdpClient::answering_dialogs)
+    web_common::connect_target(&b, target, PAGE_MAX_MESSAGE, dl)
 }
 
 /// Size the page and pin light mode, so captures don't depend on this computer's theme.
@@ -342,6 +492,8 @@ fn set_viewport(client: &mut CdpClient, width: u32, height: u32, dl: &Deadline) 
 }
 
 /// Open `url` and wait for it to settle; returns what went wrong while it loaded ([`page_health`]).
+/// A page that stops at a `confirm` or `prompt` the client holds ([`CdpClient::answering_notices`])
+/// ends the wait at once, with the question as `dialog_open` ([`dialog_open`]).
 pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u32, settle_ms: u64, dl: &Deadline) -> Result<Value, ToolError> {
     client.call("Page.enable", json!({}), None, dl)?;
     // Errors and failed requests are read from the browser's own events; a browser that refuses
@@ -350,35 +502,57 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
         let _ = client.call(domain, json!({}), None, dl);
     }
     set_viewport(client, width, height, dl)?;
-    let r = client.call("Page.navigate", json!({"url": url}), None, dl)?;
+    let mut seen: Vec<CdpEvent> = Vec::new();
+    let r = match client.call("Page.navigate", json!({"url": url}), None, dl) {
+        // The question came before the browser said the navigation started.
+        Err(_) if client.waiting_dialog().is_some() => Value::Null,
+        r => r?,
+    };
     if let Some(err) = r.get("errorText").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         return Err(ToolError::new(ErrorCode::ProgramFailed, format!("the page didn't load: {err}"))
             .with_remediation("Check the address and your internet connection, then try again."));
     }
-    // Wait for the load event (bounded by the overall deadline), then let late content settle.
+    wait_for_page(client, settle_ms, &mut seen, dl)?;
+    for domain in ["Network.disable", "Log.disable"] {
+        let _ = client.call(domain, json!({}), None, dl);
+    }
+    Ok(health_with_dialog(client, &seen))
+}
+
+/// Wait for the load event (at most 45 s, bounded by the overall deadline), then let late content
+/// settle, keeping the events [`page_health`] reads. A question the page asks ends the wait.
+fn wait_for_page(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
     let loaded = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
     let mut done = false;
-    let mut seen: Vec<CdpEvent> = Vec::new();
     let mut keep = |events: Vec<CdpEvent>| {
         let wanted = events.into_iter().filter(|e| {
             e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING
         });
         seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
     };
-    while !done && !loaded.expired() && !dl.expired() {
+    keep(client.take_events());
+    while !done && client.waiting_dialog().is_none() && !loaded.expired() && !dl.expired() {
         let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
         client.pump_until(&slice)?;
         let events = client.take_events();
         done = events.iter().any(|e| e.method == "Page.loadEventFired");
         keep(events);
     }
-    let settle = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
-    client.pump_until(&settle)?;
-    keep(client.take_events());
-    for domain in ["Network.disable", "Log.disable"] {
-        let _ = client.call(domain, json!({}), None, dl);
+    if client.waiting_dialog().is_none() {
+        let settle = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
+        client.pump_until(&settle)?;
+        keep(client.take_events());
     }
-    Ok(page_health(&seen))
+    Ok(())
+}
+
+/// [`page_health`] for what this client saw, with the question it holds as `dialog_open`.
+fn health_with_dialog(client: &CdpClient, seen: &[CdpEvent]) -> Value {
+    let mut health = page_health(seen, !client.dismisses_questions());
+    if let (Some(open), Some(o)) = (client.waiting_dialog(), health.as_object_mut()) {
+        o.insert("dialog_open".into(), dialog_open(open));
+    }
+    health
 }
 
 /// Most browser events read for a page's health (a busy page sends thousands of network events).
@@ -388,8 +562,9 @@ const MAX_HEALTH_EVENTS: usize = 20_000;
 /// errors, console errors and error log entries, each text once) and `failed_requests` (answers
 /// of 400 or more, and loads that failed). Texts are cut to one line of 300 characters and
 /// addresses lose their query strings, so ids in them aren't kept. A page that opened dialogs by
-/// itself also gets `dialogs`: each one's kind, first line and how it was answered.
-pub fn page_health(events: &[CdpEvent]) -> Value {
+/// itself also gets `dialogs`: each one's kind, first line and how it was answered (`accepted`,
+/// `dismissed`, or `waiting` for a question held for the agent when `questions_held`).
+pub fn page_health(events: &[CdpEvent], questions_held: bool) -> Value {
     let line = |s: &str| s.lines().next().unwrap_or_default().chars().take(300).collect::<String>();
     let str_at = |v: &Value, p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or_default().to_string();
     let mut urls: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -437,7 +612,13 @@ pub fn page_health(events: &[CdpEvent]) -> Value {
             _ => {}
         }
     }
-    let dialogs = web_common::dialogs_from(events);
+    let mut dialogs = web_common::dialogs_from(events);
+    // A confirm or prompt held for the agent isn't answered yet.
+    if questions_held {
+        for d in dialogs.iter_mut().filter(|d| d["answered"] == "dismissed") {
+            d["answered"] = json!("waiting");
+        }
+    }
     let mut health = json!({"errors": errors, "failed_requests": failed});
     if !dialogs.is_empty()
         && let Some(o) = health.as_object_mut()
@@ -466,6 +647,154 @@ fn page_facts(client: &mut CdpClient, dl: &Deadline) -> Result<Value, ToolError>
           forms: document.forms.length})",
         dl,
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// web_page_dialog_answer
+
+/// The id of the tool that answers a page's question; named in summaries and remediations.
+pub const DIALOG_ANSWER_TOOL: &str = "web_page_dialog_answer";
+
+/// Longest prompt answer accepted.
+const MAX_PROMPT_TEXT: usize = 10_000;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DialogAnswerParams {
+    /// true agrees (OK), false dismisses (Cancel).
+    pub accept: bool,
+    /// For a prompt: the text to answer with (accepted only). Never kept in the evidence.
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+    /// Extra time to let the page settle after the answer, in milliseconds (default 2000).
+    #[serde(default = "d_settle")]
+    pub settle_ms: u64,
+    #[serde(default = "d_timeout")]
+    pub timeout_secs: u64,
+}
+
+/// Answer the question the open website is waiting on, then report where the page ended up.
+fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
+    let p: DialogAnswerParams = parse_params(params)?;
+    if p.prompt_text.as_ref().is_some_and(|t| t.len() > MAX_PROMPT_TEXT) {
+        return Err(ToolError::invalid(format!("prompt_text is longer than {MAX_PROMPT_TEXT} bytes")));
+    }
+    if p.prompt_text.is_some() && !p.accept {
+        return Err(ToolError::invalid("prompt_text is typed only when the prompt is accepted")
+            .with_remediation("Pass accept: true with prompt_text, or leave prompt_text out."));
+    }
+    let dl = deadline(ctx, p.timeout_secs)?;
+    let site = open_site(ctx, &dl)?;
+    // Only the connection that saw the question can answer it (HeldDialog).
+    let Some(HeldDialog { open: asked, mut client }) = take_held(&site) else {
+        return Err(ToolError::new(ErrorCode::NotFound, "The page isn't waiting on a question, so there's nothing to answer.")
+            .with_remediation("A question the website asks is reported as dialog_open by web_site_open or web_site_capture; answer it then."));
+    };
+    let mut answer = json!({"accept": p.accept});
+    if let (Some(t), Some(o)) = (&p.prompt_text, answer.as_object_mut()) {
+        o.insert("promptText".into(), json!(t));
+    }
+    if let Err(e) = client.call("Page.handleJavaScriptDialog", answer, None, &dl) {
+        cleanup(&mut client, &dl);
+        // The browser says so when nothing is showing any more (the page closed it itself).
+        return Err(ToolError::new(ErrorCode::NotFound, "The page is no longer waiting on its question, so there's nothing to answer.")
+            .with_remediation("Open the website again with web_site_open to see where it is.")
+            .with_details(json!({"browser": e.message})));
+    }
+    let asked = Some(asked);
+    let r = (|| -> Result<(Value, Value), ToolError> {
+        client.call("Page.enable", json!({}), None, &dl)?;
+        for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
+            let _ = client.call(domain, json!({}), None, &dl);
+        }
+        let mut seen = Vec::new();
+        wait_after_answer(&mut client, p.settle_ms, &mut seen, &dl)?;
+        let health = health_with_dialog(&client, &seen);
+        let facts = if health.get("dialog_open").is_none() { page_facts(&mut client, &dl)? } else { Value::Null };
+        Ok((health, facts))
+    })();
+    // A question asked while we set up is held by the client: the page stopped there.
+    let r = match r {
+        Err(_) if client.waiting_dialog().is_some() => Ok((health_with_dialog(&client, &[]), Value::Null)),
+        r => r,
+    };
+    let next = client.waiting_dialog().map(dialog_open);
+    match &next {
+        Some(open) => hold(&site, open.clone(), client),
+        None => cleanup(&mut client, &dl),
+    }
+    let (health, facts) = r?;
+    let here = facts.get("url").and_then(Value::as_str).map(str::to_string);
+    if let (Some(u), Ok(mut slot)) = (&here, site.url.lock()) {
+        slot.clone_from(u);
+    }
+    let shown = shown_url(&here.clone().unwrap_or_else(|| site.url.lock().map(|u| u.clone()).unwrap_or_default()));
+    let title = facts.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+    let what = asked.as_ref().map_or_else(
+        || "the page's question".to_string(),
+        |a| format!("the page's {} (\"{}\")", if a["type"] == "prompt" { "prompt" } else { "confirm question" }, a["message"].as_str().unwrap_or_default()),
+    );
+    let verb = if p.accept { "Accepted" } else { "Dismissed" };
+    let typed = if p.prompt_text.is_some() { " with the text given" } else { "" };
+    let now = if next.is_some() {
+        String::new()
+    } else if title.is_empty() {
+        format!(" The page is now at {shown}.")
+    } else {
+        format!(" The page is now at {shown}: \"{title}\".")
+    };
+    let dialogs = health.get("dialogs").cloned().unwrap_or_else(|| json!([]));
+    let summary = format!("{verb} {what}{typed}.{now}{}{}", dialogs_said(&dialogs), next.as_ref().map(dialog_waiting_said).unwrap_or_default());
+    let visitor = ctx.session.clean_room();
+    let browser = site.handle();
+    let mut ev =
+        EvidenceBuilder::new(DIALOG_ANSWER_TOOL, Subject { kind: "website".into(), sha256: None, name: Some(shown.clone()) }, browser_env(visitor, &browser))
+            // What was typed into a prompt is the agent's answer, not the site's: only that one was given.
+            .params(json!({"accept": p.accept, "prompt_text_given": p.prompt_text.is_some()}))
+            .result(json!({
+                "answered": {"dialog": asked, "accept": p.accept},
+                "url": here.map(|u| shown_url(&u)),
+                "title": title,
+                "dialogs": dialogs,
+                "dialog_open": next,
+                "health": if visitor { Value::Null } else { health.clone() },
+            }))
+            .summary(summary)
+            .confidence(Confidence::Observed)
+            .authority(Authority::OurRun)
+            .location(Location::new("url", shown));
+    ev = match &next {
+        Some(_) => {
+            ev.limitation(waiting_limitation()).coverage(Coverage { status: CoverageStatus::Partial, examined: Some(0), total: Some(1), next_offset: None })
+        }
+        None => ev.coverage(Coverage::complete(1)),
+    };
+    Ok(ToolOutput::evidence(ev.build()?))
+}
+
+/// After an answer the page may go on loading (a navigation it asked about) or stay where it is:
+/// wait for a load that started, at most 45 s, and at least `settle_ms`.
+fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
+    let quiet = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
+    let longest = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
+    let mut loading = false;
+    while client.waiting_dialog().is_none() && !longest.expired() && !dl.expired() && (loading || !quiet.expired()) {
+        let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
+        client.pump_until(&slice)?;
+        for e in client.take_events() {
+            match e.method.as_str() {
+                "Page.frameStartedLoading" => loading = true,
+                "Page.loadEventFired" | "Page.frameStoppedLoading" => loading = false,
+                _ => {}
+            }
+            let wanted =
+                e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING;
+            if wanted && seen.len() < MAX_HEALTH_EVENTS {
+                seen.push(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -580,8 +909,10 @@ fn web_page_states_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutpu
     }
     let dl = deadline(ctx, p.timeout_secs.max(30))?;
     let site = open_site(ctx, &dl)?;
+    refuse_if_waiting(&site)?;
     let out = create_absent_dir(&p.output_directory)?;
-    let mut client = page_client(&site, &dl)?;
+    // A question one of our clicks opens is dismissed: this tool never agrees to what a control asks.
+    let mut client = page_client_dismissing(&site, &dl)?;
     let r = (|| -> Result<(String, Vec<Value>, usize), ToolError> {
         client.call("Page.enable", json!({}), None, &dl)?;
         set_viewport(&mut client, p.width, 900, &dl)?;
@@ -893,10 +1224,17 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     p.include_html &= !visitor;
     let dl = deadline(ctx, p.timeout_secs.max(30))?;
     let site = open_site(ctx, &dl)?;
+    refuse_if_waiting(&site)?;
     let mut client = page_client(&site, &dl)?;
     // A site that didn't open leaves the browser on its own error page (or a blank one), which
     // would be captured as if it were the site (#158).
-    let here = eval(&mut client, "location.href", &dl).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let here = eval(&mut client, "location.href", &dl);
+    if let Err(e) = &here
+        && client.waiting_dialog().is_some()
+    {
+        return Err(end_with(&site, client, e.clone(), &dl));
+    }
+    let here = here.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     if here.is_empty() || here.starts_with("chrome-error:") || here == "about:blank" {
         cleanup(&mut client, &dl);
         return Err(ToolError::new(ErrorCode::NotFound, "The website didn't open, so there's nothing to capture: the browser is showing its own error page.")
@@ -910,12 +1248,17 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
         }
     };
     let r = capture_into(ctx, &mut client, &out, &p, &dl);
+    // A question the page asked mid-capture stops it: say what it asks and how to answer it.
+    let r = match r {
+        Err(e) => return Err(end_with(&site, client, e, &dl)),
+        Ok(r) => r,
+    };
     // Leave the page at the first (usually desktop) width for the tools that follow.
     if let Some(w) = p.widths.first() {
         let _ = set_viewport(&mut client, *w, 900, &dl);
     }
     cleanup(&mut client, &dl);
-    let (mut blueprint, shots, html) = r?;
+    let (mut blueprint, shots, html) = r;
     let html_bytes = html.0;
     if visitor {
         visitor_view(&mut blueprint);
@@ -1459,7 +1802,7 @@ mod tests {
             ev("Network.loadingFailed", json!({"requestId": "7", "type": "Font", "errorText": "net::ERR_NAME_NOT_RESOLVED"})),
             ev("Network.loadingFailed", json!({"requestId": "8", "type": "Media", "errorText": "net::ERR_ABORTED", "canceled": true})),
         ];
-        let h = page_health(&events);
+        let h = page_health(&events, false);
         let texts: Vec<&str> = h["errors"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect();
         assert_eq!(texts, ["TypeError: x is undefined", "Hydration failed Error", "Mixed content blocked"], "one line each, once, no network log noise");
         assert_eq!(h["errors"][0]["url"], "https://ex.com/app.js");
@@ -1468,33 +1811,59 @@ mod tests {
         assert_eq!(failed[0], json!({"url": "https://ex.com/logo.png", "status": 404, "type": "Image"}));
         assert_eq!(failed[1]["url"], "https://ex.com/font.woff2");
         assert!(!h.to_string().contains("token") && !h.to_string().contains("sig="), "no query strings");
-        assert_eq!(page_health(&[]), json!({"errors": [], "failed_requests": []}));
+        assert_eq!(page_health(&[], false), json!({"errors": [], "failed_requests": []}));
         let md = readme(&json!({"health": h, "a11y": {"lang": "en", "unnamed_controls": 2, "images_without_alt": 1}}), &[], (0, 0), false);
         assert!(md.contains("- script error: TypeError: x is undefined") && md.contains("- failed request (404): https://ex.com/logo.png"), "{md}");
         assert!(md.contains("Language: en. Controls without a name: 2. Pictures without alt text: 1."), "{md}");
-        assert!(readme(&json!({"health": page_health(&[])}), &[], (0, 0), false).contains("loaded without script errors"));
+        assert!(readme(&json!({"health": page_health(&[], false)}), &[], (0, 0), false).contains("loaded without script errors"));
     }
 
     #[test]
     fn dialogs_a_page_opened_are_kept_with_their_answer_and_said() {
         let ev = |params: Value| CdpEvent { method: cdp::DIALOG_OPENING.into(), params, session_id: None };
-        let h = page_health(&[
+        let events = [
             ev(json!({"type": "alert", "message": "Settings changed; resetting.\nline two", "url": "https://ex.com/?k=1"})),
             ev(json!({"type": "confirm", "message": "Delete everything?"})),
-        ]);
+        ];
+        let h = page_health(&events, false);
         assert_eq!(
             h["dialogs"],
             json!([
                 {"type": "alert", "message": "Settings changed; resetting.", "answered": "accepted"},
                 {"type": "confirm", "message": "Delete everything?", "answered": "dismissed"},
             ]),
-            "one line each, and a confirm is never agreed to"
+            "one line each, and a confirm our own click opened is never agreed to"
         );
-        assert!(page_health(&[]).get("dialogs").is_none(), "a page without dialogs keeps the old shape");
+        assert!(page_health(&[], false).get("dialogs").is_none(), "a page without dialogs keeps the old shape");
         let said = dialogs_said(&h["dialogs"]);
         assert_eq!(said, " The page opened an alert by itself (\"Settings changed; resetting.\") and 1 more; it was accepted so the page could go on.");
         assert_eq!(dialogs_said(&json!([])), "");
         assert_eq!(dialogs_said(&Value::Null), "");
+        // Held for the agent: the question is waiting, and only the alert is said as answered.
+        let held = page_health(&events, true);
+        assert_eq!(held["dialogs"][1]["answered"], "waiting");
+        assert_eq!(
+            dialogs_said(&held["dialogs"]),
+            " The page opened an alert by itself (\"Settings changed; resetting.\"); it was accepted so the page could go on."
+        );
+    }
+
+    #[test]
+    fn a_question_the_page_waits_on_is_said_with_how_to_answer_it() {
+        let open =
+            dialog_open(&json!({"type": "confirm", "message": "Continue to the new version?\nsecond line", "defaultPrompt": "", "url": "https://ex.com/?t=1"}));
+        assert_eq!(open, json!({"type": "confirm", "message": "Continue to the new version?"}), "first line only, no address");
+        let prompt = dialog_open(&json!({"type": "prompt", "message": "Your team?", "defaultPrompt": "Sales"}));
+        assert_eq!(prompt["default_prompt"], "Sales");
+        assert_eq!(
+            dialog_waiting_said(&open),
+            " The page is waiting for an answer to a confirm question (\"Continue to the new version?\"): nothing in it can be read until it's answered. Answer it with web_page_dialog_answer (accept: true agrees, false dismisses)."
+        );
+        // A tool the question stops says what it asks and names the tool that answers it.
+        let e = dialog_refusal(&prompt);
+        assert_eq!(e.message, "The page is waiting for an answer to its prompt (\"Your team?\"), so nothing in it can be read.");
+        assert!(e.remediation.as_deref().is_some_and(|r| r.contains(DIALOG_ANSWER_TOOL)), "{e:?}");
+        assert_eq!(e.details.as_ref().map(|d| d[cdp::DIALOG_DETAIL].clone()), Some(prompt));
     }
 
     #[test]
@@ -1665,6 +2034,56 @@ mod tests {
         assert_eq!(err.code, ErrorCode::NotFound, "{}", err.message);
         assert!(err.message.contains("didn't open"), "{}", err.message);
         assert!(!out.exists(), "no folder is made for a capture that can't happen");
+    }
+
+    /// #2018: a page that asks before it shows anything waits for the agent's answer, and a capture
+    /// says why it can't start. Live: it needs a Chromium-based browser (`--ignored`).
+    #[test]
+    #[ignore]
+    fn a_question_on_load_waits_for_the_agents_answer() {
+        use std::io::{Read, Write};
+        let page = r#"<!doctype html><html><head><title>Asking</title></head><body><script>
+document.title = confirm('Continue to the new version?\nIt has a new layout.') ? 'Agreed' : 'Declined';
+if (document.title === 'Agreed') { var t = prompt('Your team?', 'Sales'); document.title = t === null ? 'No team' : 'Team ' + t; }
+</script></body></html>"#;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+            }
+        });
+        let e = crate::Engine::new(crate::testing::live_session());
+        let cli = || crate::CallOptions::new(crate::Caller::Cli).with_consent(crate::Consent::Granted);
+        let started = std::time::Instant::now();
+        let opened = e.call("web_site_open", json!({"url": url}), cli()).unwrap().to_json();
+        assert!(started.elapsed() < Duration::from_secs(30), "it says so at once instead of waiting out its deadline");
+        assert_eq!(opened["result"]["dialog_open"], json!({"type": "confirm", "message": "Continue to the new version?"}), "{opened}");
+        assert!(opened["summary"].as_str().unwrap().contains(DIALOG_ANSWER_TOOL), "{}", opened["summary"]);
+        assert_eq!(opened["coverage"]["status"], "partial");
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("capture");
+        let err = e.call("web_site_capture", json!({"output_directory": out.display().to_string(), "widths": [1440]}), cli()).unwrap_err();
+        assert!(err.message.contains("waiting for an answer to its confirm"), "{}", err.message);
+        assert!(!out.exists(), "no folder for a capture that can't start");
+        let asked = std::time::Instant::now();
+        let shot = e.call("web_page_screenshot_take", json!({}), cli()).unwrap_err();
+        assert!(shot.message.contains("waiting for an answer"), "the other browser tools say so too: {}", shot.message);
+        assert!(asked.elapsed() < Duration::from_secs(10), "at once, not at their deadline");
+
+        let agreed = e.call(DIALOG_ANSWER_TOOL, json!({"accept": true}), cli()).unwrap().to_json();
+        assert_eq!(agreed["result"]["dialog_open"], json!({"type": "prompt", "message": "Your team?", "default_prompt": "Sales"}), "{agreed}");
+        let typed = e.call(DIALOG_ANSWER_TOOL, json!({"accept": true, "prompt_text": "Design"}), cli()).unwrap().to_json();
+        assert_eq!(typed["result"]["title"], "Team Design", "{typed}");
+        assert_eq!(typed["result"]["dialog_open"], Value::Null);
+        assert_eq!(typed["params"], json!({"accept": true, "prompt_text_given": true}), "what was typed isn't kept");
+        let none = e.call(DIALOG_ANSWER_TOOL, json!({"accept": false}), cli()).unwrap_err();
+        assert_eq!(none.code, ErrorCode::NotFound, "{}", none.message);
+        let captured = e.call("web_site_capture", json!({"output_directory": out.display().to_string(), "widths": [1440]}), cli());
+        assert!(captured.is_ok(), "once answered, the page can be captured: {:?}", captured.err());
     }
 
     /// An engine with `page` open in a real browser, served from a local port. Live: it needs a

@@ -481,8 +481,9 @@ func TestAnswer(t *testing.T) {
     }
 
     /// #1837: with a Rust project's Cargo.toml left beside the Python it was rewritten in, a
-    /// Python build isn't checked with Cargo. Whether Python is installed doesn't matter here:
-    /// either way, nothing about Cargo comes back.
+    /// Python build isn't checked with Cargo, and a build is still run (Python's, the only other
+    /// toolchain there). Whether Python is installed doesn't matter here: either way, the note is
+    /// a toolchain build's outcome and says nothing about Cargo.
     #[test]
     fn a_build_moved_to_python_is_not_checked_with_cargo() {
         let (d, stop) = (tempfile::tempdir().unwrap(), CheckStop::default());
@@ -490,6 +491,8 @@ func TestAnswer(t *testing.T) {
         std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"game\"\n").unwrap();
         let note = build_check(d.path(), "app/", "Python", None, &stop).1;
         assert!(!note.to_lowercase().contains("cargo"), "{note}");
+        let ran = note.ends_with("` passed.") || note.starts_with("Build failed:") || note.starts_with("Couldn't run the build:");
+        assert!(ran, "a build ran, not \"nothing to build\": {note}");
         let note = build_check(d.path(), "app/", "Rust + macroquad", None, &stop).1;
         assert!(note.to_lowercase().contains("cargo"), "a Rust stack still builds with Cargo: {note}");
     }

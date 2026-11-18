@@ -91,15 +91,27 @@ fn parse(text: &str) -> Result<Table, toml::de::Error> {
 
 /// A request as `asked_by` phrases are matched: lower-case words, punctuation turned into
 /// spaces, padded with spaces (`"Use Next.js, shadcn/ui"` → `" use next js shadcn ui "`). "C#"
-/// reads "csharp", since without its `#` it would be C, and ".NET" as a word of its own reads
-/// "dotnet", since without its dot it would be "net revenue"'s net.
+/// reads "csharp", since without its `#` it would be C, and ".NET" or "ASP.NET" as a word of its
+/// own (in quotes, brackets or backticks too) reads "dotnet", since without its dot it would be
+/// "net revenue"'s net. An address (`https://asp.net`, `www.…`) is read as it is.
 pub fn words(request: &str) -> String {
-    let lower = format!(" {}", request.to_lowercase())
-        .replace("c#", "csharp")
-        .replace(" .net", " dotnet")
-        .replace("(.net", "( dotnet")
-        .replace("asp.net", "asp dotnet");
-    format!(" {} ", lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+    let lower = request.to_lowercase();
+    let read: Vec<String> = lower
+        .split_whitespace()
+        .map(|raw| {
+            if raw.contains("://") || raw.contains("www.") {
+                return raw.to_string();
+            }
+            let word = raw.trim_matches(|c: char| !c.is_alphanumeric() && !matches!(c, '.' | '#')).trim_end_matches('.');
+            match word {
+                ".net" => "dotnet".into(),
+                "asp.net" => "asp dotnet".into(),
+                _ => raw.replace("c#", "csharp"),
+            }
+        })
+        .collect();
+    let read = read.join(" ");
+    format!(" {} ", read.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
 }
 
 pub fn get(name: &str) -> Option<&'static Stack> {
@@ -153,12 +165,30 @@ pub fn toolchain_for(stack: &str, app: &std::path::Path) -> Option<&'static Tool
     own_toolchain(stack, app).or_else(|| toolchain_in(app))
 }
 
+/// Each language's files in `app` ([`Toolchain::marker_files`]) with their size and time, to tell
+/// what a builder's turn wrote from what was there before it.
+pub type LanguageFiles = Vec<(&'static str, Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>)>;
+
+pub fn language_files(app: &std::path::Path) -> LanguageFiles {
+    let stat = |p: std::path::PathBuf| {
+        let meta = std::fs::metadata(&p).ok();
+        let (len, time) = (meta.as_ref().map_or(0, std::fs::Metadata::len), meta.and_then(|m| m.modified().ok()));
+        (p, len, time)
+    };
+    craft_anything_engine::toolchains::catalogue().iter().map(|t| (t.name.as_str(), t.marker_files(app).into_iter().map(stat).collect())).collect()
+}
+
 /// `asked`, the stack a follow-up request names, when the build moved to it: its files are in
-/// `app`, with its own dependencies when it has some (a package.json for Next.js isn't
+/// `app`, written or changed since `before` (a turn that left an old `main.py` as it was hasn't
+/// moved to Python), with its own dependencies when it has some (a package.json for Next.js isn't
 /// Electron), and it is written in another language than `stack`. Within one language (a Vite
 /// site that mentions Electron) the recorded stack stays.
-pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path) -> Option<&'static str> {
+pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path, before: &LanguageFiles) -> Option<&'static str> {
     let new = own_toolchain(asked, app)?;
+    let files = |all: &LanguageFiles| all.iter().find(|(name, _)| *name == new.name).map(|(_, f)| f.clone()).unwrap_or_default();
+    if files(&language_files(app)) == files(before) {
+        return None;
+    }
     let s = get(asked)?;
     if !s.uses.is_empty() {
         // Only the new language's own file counts: a Cargo key named `phaser` isn't npm's Phaser.
@@ -252,8 +282,9 @@ mod tests {
         assert_eq!(found(&[("Cargo.toml", "not [ toml")]), Some(BUILDERS_CHOICE));
         assert_eq!(found(&[("pyproject.toml", "")]), Some("Python"));
         assert_eq!(found(&[("requirements.txt", "")]), Some("Python"));
-        assert_eq!(found(&[("go.mod", "")]), Some(BUILDERS_CHOICE));
-        assert_eq!(found(&[("App.csproj", "")]), Some(BUILDERS_CHOICE));
+        assert_eq!(found(&[("go.mod", "")]), Some("Go"));
+        assert_eq!(found(&[("App.csproj", "")]), Some("C# (.NET)"));
+        assert_eq!(found(&[("Gemfile", "")]), Some(BUILDERS_CHOICE), "a language with no stack");
         assert_eq!(found(&[("index.html", "")]), Some("Plain HTML and CSS"));
         assert_eq!(found(&[("notes.md", "")]), None);
     }
@@ -330,15 +361,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let tool = |stack: &str| toolchain_for(stack, d.path()).map(|t| t.name.as_str());
         std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Python", d.path()), None, "no Python files yet: the build hasn't moved");
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()), None, "no Python files yet: the build hasn't moved");
         std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"game\"\n").unwrap();
         assert_eq!(tool("Rust + macroquad"), Some("Rust"));
         assert_eq!(tool("Python"), Some("Python"), "not the Cargo.toml left behind");
         assert_eq!(tool("Unity"), Some("Rust"), "a stack with no toolchain takes the first found, as before");
-        assert_eq!(moved_to("Rust + macroquad", "Python", d.path()), Some("Python"));
-        assert_eq!(moved_to("Python", "Python", d.path()), None, "already recorded");
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()), Some("Python"));
+        assert_eq!(moved_to("Python", "Python", d.path(), &Vec::new()), None, "already recorded");
         std::fs::write(d.path().join("package.json"), "{}").unwrap();
-        assert_eq!(moved_to("React + TypeScript (Vite)", "Electron", d.path()), None, "one language: the stack stays");
+        assert_eq!(moved_to("React + TypeScript (Vite)", "Electron", d.path(), &Vec::new()), None, "one language: the stack stays");
     }
 
     /// Go, C# and Java have stacks too, so a build moved to one of them is recorded and checked
@@ -358,9 +389,9 @@ mod tests {
             std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
             let asked = asked_for(&words(request)).map(|s| s.name.as_str());
             assert_eq!(asked, Some(stack), "{request}");
-            assert_eq!(moved_to("Rust + macroquad", stack, d.path()), None, "{stack}: nothing of it yet");
+            assert_eq!(moved_to("Rust + macroquad", stack, d.path(), &Vec::new()), None, "{stack}: nothing of it yet");
             std::fs::write(d.path().join(file), "").unwrap();
-            assert_eq!(moved_to("Rust + macroquad", stack, d.path()), Some(stack), "{file}");
+            assert_eq!(moved_to("Rust + macroquad", stack, d.path(), &Vec::new()), Some(stack), "{file}");
             assert_eq!(toolchain_for(stack, d.path()).map(|t| t.name.as_str()), Some(tool), "{file}: not the Cargo.toml left behind");
         }
         assert_eq!(asked_for(&words("sign in, go to settings")), None, "the verb \"go\" isn't Go");
@@ -373,9 +404,45 @@ mod tests {
         for r in ["Add a table with net revenue", "use the money in net terms", "link to example.net"] {
             assert_eq!(asked_for(&words(r)), None, "{r}");
         }
-        for r in ["rewrite it in .NET", "an ASP.NET site", "C# (.NET) please", ".NET 9"] {
+        for r in ["rewrite it in .NET", "an ASP.NET site", "C# (.NET) please", ".NET 9", "Rewrite it in `.NET`", "in \".NET\"", "port it to .NET."] {
             assert_eq!(asked_for(&words(r)).map(|s| s.name.as_str()), Some("C# (.NET)"), "{r}");
         }
+        // Addresses are read as they are, and "<language> to go" is a port only after "from".
+        for r in ["Add a link to https://asp.net", "see www.asp.net for more", "Use Python to go through the CSV files"] {
+            assert_eq!(asked_for(&words(r)), None, "{r}");
+        }
+        for r in ["Port this from Rust to Java", "port it to Java", "rewrite this from Python to Java"] {
+            assert_eq!(asked_for(&words(r)).map(|s| s.name.as_str()), Some("Java"), "{r}");
+        }
+        assert_eq!(asked_for(&words("port this to Go")).map(|s| s.name.as_str()), Some("Go"));
+    }
+
+    /// A folder of the person's own Go, C# or Java project is that stack, not the builder's choice.
+    #[test]
+    fn an_own_go_csharp_or_java_folder_is_found_as_that_stack() {
+        for (file, stack) in [("go.mod", "Go"), ("Shop.csproj", "C# (.NET)"), ("Shop.sln", "C# (.NET)"), ("pom.xml", "Java"), ("build.gradle.kts", "Java")] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(d.path().join(file), "").unwrap();
+            assert_eq!(found_in(d.path()).map(|s| s.name.as_str()), Some(stack), "{file}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("Gemfile"), "").unwrap();
+        assert_eq!(found_in(d.path()).map(|s| s.name.as_str()), Some(BUILDERS_CHOICE), "a language with no stack");
+    }
+
+    /// Review of #2099: a move shows in files the turn wrote, not in ones it left as they were.
+    #[test]
+    fn a_move_needs_files_the_turn_wrote() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("go.mod"), "module app\n").unwrap();
+        std::fs::write(d.path().join("main.py"), "print(1)\n").unwrap();
+        let before = language_files(d.path());
+        assert_eq!(moved_to("Go", "Python", d.path(), &before), None, "an old main.py the turn didn't touch");
+        std::fs::write(d.path().join("main.py"), "print('rewritten')\n").unwrap();
+        assert_eq!(moved_to("Go", "Python", d.path(), &before), Some("Python"), "rewritten");
+        let before = language_files(d.path());
+        std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"app\"\n").unwrap();
+        assert_eq!(moved_to("Go", "Python", d.path(), &before), Some("Python"), "a new manifest");
     }
 
     /// Review of #2099: what shows a move, and what mustn't undo one.
@@ -385,23 +452,28 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
         std::fs::write(d.path().join("main.py"), "print(1)\n").unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Python", d.path()), Some("Python"));
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()), Some("Python"));
         assert_eq!(toolchain_for("Python", d.path()).map(|t| t.name.as_str()), Some("Python"));
         // A package.json for Next.js is no move to Electron; one that lists electron is.
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"next": "16"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path()), None);
+        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path(), &Vec::new()), None);
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"electron": "39"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path()), Some("Electron"));
+        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path(), &Vec::new()), Some("Electron"));
         // React needs React as well as Vite: a Vue app built with Vite isn't one.
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"vue": "3"}, "devDependencies": {"vite": "7"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path()), None);
+        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path(), &Vec::new()), None);
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"react": "19"}, "devDependencies": {"vite": "7"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path()), Some("React + TypeScript (Vite)"));
+        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path(), &Vec::new()), Some("React + TypeScript (Vite)"));
         // Only the new language's own file counts: a Cargo key named phaser isn't npm's Phaser.
         let cargo = tempfile::tempdir().unwrap();
         std::fs::write(cargo.path().join("Cargo.toml"), "[dependencies]\nphaser = \"1\"\n").unwrap();
         std::fs::write(cargo.path().join("package.json"), r#"{"dependencies": {"lodash": "4"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Phaser", cargo.path()), None);
+        assert_eq!(moved_to("Rust + macroquad", "Phaser", cargo.path(), &Vec::new()), None);
+        // A renamed crate counts under its package: `engine = { package = "bevy" }` is Bevy.
+        let bevy = tempfile::tempdir().unwrap();
+        std::fs::write(bevy.path().join("package.json"), r#"{"dependencies": {"electron": "39"}}"#).unwrap();
+        std::fs::write(bevy.path().join("Cargo.toml"), "[dependencies]\nengine = { package = \"bevy\", version = \"0.17\" }\n").unwrap();
+        assert_eq!(moved_to("Electron", "Bevy", bevy.path(), &Vec::new()), Some("Bevy"));
         // A Python build keeps its stack beside an old Vite package.json; a Vite one doesn't hold.
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"vite": "7"}}"#).unwrap();
         assert!(holds_its_language("Python", d.path()));

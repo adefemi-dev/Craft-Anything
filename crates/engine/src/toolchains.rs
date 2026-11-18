@@ -123,6 +123,14 @@ impl Toolchain {
         self.standalone_entrypoints && self.launch.iter().any(|r| !r.file.contains('*') && dir.join(&r.file).is_file())
     }
 
+    /// The files in `dir` that say a project is written with it: the first match of each marker
+    /// (`go.mod`, a `.csproj`) and its fixed launch files (`main.py`, `main.go`).
+    pub fn marker_files(&self, dir: &Path) -> Vec<PathBuf> {
+        let markers = self.found_by.iter().flat_map(|pattern| matching_files(dir, pattern, true));
+        let launch = self.launch.iter().filter(|r| !r.file.contains('*')).map(|r| dir.join(&r.file)).filter(|p| p.is_file());
+        markers.chain(launch).collect()
+    }
+
     /// Resolve a command, preferring the project's own interpreter/build wrapper on this OS.
     pub fn command(&self, app: &Path, command: &[String]) -> Option<(PathBuf, Vec<String>)> {
         self.command_for(app, command, cfg!(windows))

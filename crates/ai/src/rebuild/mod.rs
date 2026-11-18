@@ -1014,8 +1014,12 @@ impl Worker {
                 }
                 // The stack is recorded as the one the build uses, once it shows: left to the builder,
                 // or another than the default because the request asked for it. A game engine stays
-                // (it says the project is a game, and its editor is found for it).
-                if game::Builder::from_stack(&ws.manifest.stack).is_none()
+                // (it says the project is a game, and its editor is found for it), unless a follow-up
+                // asked for a stack in another language and the build moved to it (#1837).
+                let moved = opts.message.as_deref().and_then(|m| opts.kinds.named(m, &ws.manifest.target));
+                if let Some(s) = moved.and_then(|s| stacks::moved_to(&ws.manifest.stack, s, &ws.app_dir())) {
+                    ws.manifest.stack = s.to_string();
+                } else if game::Builder::from_stack(&ws.manifest.stack).is_none()
                     && let Some(s) = stacks::used_in(&ws.app_dir())
                 {
                     ws.manifest.stack = s.name.clone();

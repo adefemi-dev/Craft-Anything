@@ -40,6 +40,9 @@ pub struct Stack {
     pub program: Option<String>,
     #[serde(default)]
     pub program_from: Option<String>,
+    /// The toolchain its build is checked with (`Rust`, `Node.js`), by name in toolchains.toml.
+    #[serde(default)]
+    pub toolchain: Option<String>,
 }
 
 pub use craft_anything_engine::toolchains::{Toolchain, found_in as toolchain_in};
@@ -120,6 +123,27 @@ pub fn asked_for(words: &str) -> Option<&'static Stack> {
 pub fn used_in(app: &std::path::Path) -> Option<&'static Stack> {
     let deps = craft_anything_engine::outputs::npm_dependencies(app);
     catalogue().iter().find(|s| s.uses.iter().any(|d| deps.contains(d)))
+}
+
+/// The toolchain `stack` is written in, when its files are in `app`.
+fn own_toolchain(stack: &str, app: &std::path::Path) -> Option<&'static Toolchain> {
+    let name = get(stack)?.toolchain.as_deref()?;
+    craft_anything_engine::toolchains::catalogue().iter().find(|t| t.name == name).filter(|t| t.is_in(app))
+}
+
+/// The toolchain `app` is built with: the recorded stack's when its files are there, since a
+/// project moved to another language can still hold the old one's manifest (#1837); else the
+/// first found.
+pub fn toolchain_for(stack: &str, app: &std::path::Path) -> Option<&'static Toolchain> {
+    own_toolchain(stack, app).or_else(|| toolchain_in(app))
+}
+
+/// `asked`, the stack a follow-up request names, when the build moved to it: its files are in
+/// `app` and it is written in another language than `stack`. Within one language (a Vite site
+/// that mentions Electron) the recorded stack stays.
+pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path) -> Option<&'static str> {
+    let new = own_toolchain(asked, app)?;
+    (get(stack).and_then(|s| s.toolchain.as_deref()) != Some(new.name.as_str())).then_some(asked)
 }
 
 /// The stack a folder of the person's own files is built with: an engine's project file says
@@ -237,6 +261,12 @@ mod tests {
             assert!(get(b.stack()).is_some(), "no stack in stacks.toml for {}", b.stack());
         }
         assert_eq!(get("Unity").and_then(|s| s.engine.as_deref()), Some("unity"));
+        let tools = craft_anything_engine::toolchains::catalogue();
+        for s in catalogue() {
+            let t = s.toolchain.as_deref();
+            assert!(t.is_none_or(|t| tools.iter().any(|c| c.name == t)), "{} names no toolchain in toolchains.toml", s.name);
+            assert_eq!(s.program.is_some(), t == Some("Rust"), "{}: every Rust stack, and only those, needs cargo", s.name);
+        }
         assert!(parse("[[stack]]\nname = 3").is_err(), "a broken table is an error, not a panic");
         for l in &table().library {
             assert!(!l.steps.is_empty() && !l.asked_by.is_empty(), "{l:?}");
@@ -263,6 +293,25 @@ mod tests {
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"astro": "5"}}"#).unwrap();
         assert!(used_in(d.path()).is_none(), "a stack the table doesn't know stays the builder's choice");
         assert_eq!(libraries_for("use shadcn", BUILDERS_CHOICE).len(), 1, "a library works with the builder's choice too");
+    }
+
+    /// #1837: a Rust project rewritten in Python still holds its Cargo.toml until it's moved out.
+    /// The build is checked in the language of the stack recorded, which a follow-up asking for
+    /// another language moves once the new one's files are there.
+    #[test]
+    fn a_build_moved_to_another_language_is_checked_in_the_new_one() {
+        let d = tempfile::tempdir().unwrap();
+        let tool = |stack: &str| toolchain_for(stack, d.path()).map(|t| t.name.as_str());
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path()), None, "no Python files yet: the build hasn't moved");
+        std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"game\"\n").unwrap();
+        assert_eq!(tool("Rust + macroquad"), Some("Rust"));
+        assert_eq!(tool("Python"), Some("Python"), "not the Cargo.toml left behind");
+        assert_eq!(tool("Unity"), Some("Rust"), "a stack with no toolchain takes the first found, as before");
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path()), Some("Python"));
+        assert_eq!(moved_to("Python", "Python", d.path()), None, "already recorded");
+        std::fs::write(d.path().join("package.json"), "{}").unwrap();
+        assert_eq!(moved_to("React + TypeScript (Vite)", "Electron", d.path()), None, "one language: the stack stays");
     }
 
     #[test]

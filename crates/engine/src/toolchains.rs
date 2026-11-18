@@ -69,7 +69,7 @@ pub fn catalogue() -> &'static [Toolchain] {
 pub fn found_in(dir: &Path) -> Option<&'static Toolchain> {
     catalogue()
         .iter()
-        .find(|t| t.found_by.iter().any(|pattern| !matching_files(dir, pattern).is_empty()))
+        .find(|t| t.is_in(dir))
         .or_else(|| catalogue().iter().find(|t| t.standalone_entrypoints && t.launch.iter().any(|r| !r.file.contains('*') && dir.join(&r.file).is_file())))
 }
 
@@ -109,6 +109,11 @@ fn scan_entries(dir: &Path, candidate: impl Fn(std::fs::DirEntry) -> std::io::Re
 }
 
 impl Toolchain {
+    /// Whether one of the files that name it is in `dir`.
+    pub fn is_in(&self, dir: &Path) -> bool {
+        self.found_by.iter().any(|pattern| !matching_files(dir, pattern).is_empty())
+    }
+
     /// Resolve a command, preferring the project's own interpreter/build wrapper on this OS.
     pub fn command(&self, app: &Path, command: &[String]) -> Option<(PathBuf, Vec<String>)> {
         self.command_for(app, command, cfg!(windows))

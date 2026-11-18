@@ -758,6 +758,11 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     if let (Some(t), Some(o)) = (&p.prompt_text, answer.as_object_mut()) {
         o.insert("promptText".into(), json!(t));
     }
+    // What the client saw before the answer is kept, except the held question's own opening: it
+    // was reported when it was held, and read again after the answer it would be listed twice.
+    // A question that opens after the answer is a new one and is read as such.
+    let mut seen: Vec<CdpEvent> =
+        client.take_events().into_iter().filter(|e| !(e.method == cdp::DIALOG_OPENING && !cdp::is_notice(&e.params))).take(MAX_HEALTH_EVENTS).collect();
     // What the page took: this answer, or one sent before whose reply came late (then this one
     // isn't sent, so it can't land on a question the page asked since).
     let (taken, earlier) = match client.answer_dialog(answer, &dl) {
@@ -792,18 +797,18 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
             let _ = client.call(domain, json!({}), None, &dl);
         }
-        let mut seen = Vec::new();
         wait_after_answer(&mut client, p.settle_ms, &mut seen, &dl)?;
         let health = health_with_dialog(&client, &seen);
         let facts = if health.get("dialog_open").is_none() { page_facts(&mut client, &dl)? } else { Value::Null };
         Ok((health, facts))
     })();
-    // A question asked while we set up is held by the client: the page stopped there. Its opening
-    // is still queued; read it now, or the next answer would take it for something said after.
+    // A question asked while we set up or read the page is held by the client: the page stopped
+    // there. Its opening may still be queued; read it now with what was seen before, or the next
+    // answer would take it for something said after.
     let r = match r {
         Err(_) if client.waiting_dialog().is_some() => {
-            let queued = client.take_events();
-            Ok((health_with_dialog(&client, &queued), Value::Null))
+            seen.extend(client.take_events());
+            Ok((health_with_dialog(&client, &seen), Value::Null))
         }
         r => r,
     };
@@ -2113,10 +2118,17 @@ mod tests {
 
     /// An engine whose open website is the stand-in page `client` reaches, waiting on the
     /// question it has already sent.
-    fn engine_held(mut client: CdpClient, ep: &Endpoint) -> crate::Engine {
+    fn engine_held(client: CdpClient, ep: &Endpoint) -> crate::Engine {
+        engine_held_as(client, ep, true)
+    }
+
+    /// [`engine_held`]; `read` false leaves the question's opening in the client's queue, as a
+    /// question that stopped a capture's own reads is held.
+    fn engine_held_as(mut client: CdpClient, ep: &Endpoint, read: bool) -> crate::Engine {
         client.pump_until(&Deadline::new(Duration::from_millis(500), crate::tool::CancelToken::default())).unwrap();
-        let events = client.take_events();
-        let open = dialog_open(client.waiting_dialog().expect("the stand-in asked a question"));
+        let asking = client.waiting_dialog().expect("the stand-in asked a question").clone();
+        let events = if read { client.take_events() } else { vec![CdpEvent { method: cdp::DIALOG_OPENING.into(), params: asking.clone(), session_id: None }] };
+        let open = dialog_open(&asking);
         let mut health = page_health(&events, true);
         health["dialog_open"] = open.clone();
         let site = SiteBrowser {
@@ -2257,6 +2269,53 @@ mod tests {
         assert!(fix.contains(DIALOG_ANSWER_TOOL) && fix.contains("new output_directory") && fix.contains("out/capture"), "{fix}");
         let other = ToolError::new(ErrorCode::ProgramFailed, "screenshot failed").with_remediation("Try again.");
         assert_eq!(capture_interrupted(other, "out/capture").remediation.as_deref(), Some("Try again."));
+    }
+
+    /// #2019 review: the held question's own opening, still queued (a capture held it), isn't
+    /// listed again as something the page did after the answer.
+    #[test]
+    fn the_answered_question_is_listed_once() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            send_frame(
+                s,
+                json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"type": "string", "value": "before the answer"}]}}),
+            );
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            reply_until(s, |_| false);
+        });
+        let e = engine_held_as(client, &ep, false);
+        let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["dialogs"], json!([]), "nothing opened after the answer: {done}");
+        let h = stored_health(&e);
+        assert_eq!(h["dialogs"], json!([{"type": "confirm", "message": "Continue?", "answered": "accepted"}]), "{h}");
+        assert!(h["errors"].as_array().unwrap().iter().any(|x| x["text"] == "before the answer"), "other queued events are kept: {h}");
+    }
+
+    /// #2019 review: when a question stops the page's facts after the answer, the events already
+    /// read are kept with it.
+    #[test]
+    fn events_read_before_a_question_stops_the_facts_are_kept() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            send_frame(
+                s,
+                json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"type": "string", "value": "after the answer"}]}}),
+            );
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            // Reading the page's facts is interrupted by the next question.
+            reply_until(s, |m| m["method"] == "Runtime.evaluate").unwrap();
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": ""}}));
+            reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        let asked = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(asked["result"]["dialog_open"]["type"], "prompt", "{asked}");
+        let h = stored_health(&e);
+        assert!(h["errors"].as_array().unwrap().iter().any(|x| x["text"] == "after the answer"), "{h}");
+        assert_eq!(h["dialogs"][1], json!({"type": "prompt", "message": "Your team?", "answered": "waiting"}), "{h}");
     }
 
     /// #2019 review: an answer that runs out of time keeps the question for another try, and the

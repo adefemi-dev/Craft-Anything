@@ -2166,6 +2166,7 @@ Gaps found while using the app for real projects.
       a Rust project rewritten in Python is still checked with Cargo until the old manifest is
       moved out (#1837): record the stack from what was built for every toolchain, and check
       with that
+      — claimed: justinjohn0306, branch bugfix/r2.9-check-the-stack-that-was-built
 - [x] One design system for the desktop app: a typed scale (text sizes, gaps, padding, icon and
       control sizes) in `theme.rs`, one set of buttons (primary, secondary, ghost, danger),
       switches and fields in `widgets.rs`, and every screen moved onto them, so sizes and spacing

@@ -594,6 +594,9 @@ pub struct CdpClient {
     /// The frames that started loading and haven't stopped (or gone), by id, as events arrive:
     /// kept with the connection, so a wait can resume after a question. Bounded ([`MAX_LOADING_FRAMES`]).
     loading_frames: std::collections::HashSet<String>,
+    /// A frame start was dropped at the cap: whether everything stopped can't be known, so the
+    /// page counts as loading and a wait runs to its own bound.
+    loading_unknown: bool,
 }
 
 /// Most frames a client tracks as loading; a page can start any number of them.
@@ -682,6 +685,7 @@ impl CdpClient {
             questions: 0,
             unsettled: None,
             loading_frames: std::collections::HashSet::new(),
+            loading_unknown: false,
         }
     }
 
@@ -726,8 +730,9 @@ impl CdpClient {
     }
 
     /// Whether a frame of the page is still loading, from the frame events seen so far.
+    /// Past [`MAX_LOADING_FRAMES`] it stays true for the connection, so a wait ends at its bound.
     pub fn frames_loading(&self) -> bool {
-        !self.loading_frames.is_empty()
+        self.loading_unknown || !self.loading_frames.is_empty()
     }
 
     /// Drop the queued openings of questions (`confirm`, `prompt`), keeping every other event in
@@ -828,8 +833,13 @@ impl CdpClient {
             Some(DIALOG_CLOSED) => self.waiting = None,
             // Each frame's own stop (or its removal) ends its load: the root document's load event
             // doesn't, since an iframe can still be loading then.
-            Some("Page.frameStartedLoading") if self.loading_frames.len() < MAX_LOADING_FRAMES => {
-                self.loading_frames.insert(v["params"]["frameId"].as_str().unwrap_or_default().to_string());
+            Some("Page.frameStartedLoading") => {
+                let id = v["params"]["frameId"].as_str().unwrap_or_default();
+                if self.loading_frames.len() < MAX_LOADING_FRAMES {
+                    self.loading_frames.insert(id.to_string());
+                } else if !self.loading_frames.contains(id) {
+                    self.loading_unknown = true;
+                }
             }
             Some("Page.frameStoppedLoading" | "Page.frameDetached") => {
                 self.loading_frames.remove(v["params"]["frameId"].as_str().unwrap_or_default());
@@ -1222,6 +1232,29 @@ mod tests {
             Ok(DialogAnswer::NotShowing(e)) => assert!(e.message.contains("No dialog is showing"), "{}", e.message),
             other => panic!("expected the earlier answer's refusal, got {other:?}"),
         }
+    }
+
+    /// Past the frame cap, a dropped start leaves the load unknown: still loading, never idle.
+    #[test]
+    fn frames_past_the_cap_keep_the_page_loading() {
+        let mut client = stand_in(|s| {
+            for i in 0..=MAX_LOADING_FRAMES {
+                send(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": format!("f{i}")}}));
+            }
+            for i in 0..MAX_LOADING_FRAMES {
+                send(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": format!("f{i}")}}));
+            }
+            let _ = receive(s);
+        });
+        client.pump_until(&Deadline::new(Duration::from_millis(500), CancelToken::default())).unwrap();
+        assert!(client.frames_loading(), "the frame past the cap may still be loading");
+        let mut few = stand_in(|s| {
+            send(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+            send(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "F"}}));
+            let _ = receive(s);
+        });
+        few.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        assert!(!few.frames_loading(), "every tracked frame stopped");
     }
 
     #[test]

@@ -794,6 +794,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         }
     };
     let asked = Some(asked);
+    let mut unread: Option<String> = None;
     let r = (|| -> Result<(Value, Value), ToolError> {
         client.call("Page.enable", json!({}), None, &dl)?;
         for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
@@ -801,7 +802,14 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         }
         wait_after_answer(&mut client, p.settle_ms, &mut seen, &dl)?;
         let health = health_with_dialog(&client, &seen);
-        let facts = if health.get("dialog_open").is_none() { page_facts(&mut client, &dl)? } else { Value::Null };
+        if health.get("dialog_open").is_some() {
+            return Ok((health, Value::Null));
+        }
+        // A read started with no time left fails before it's sent: say so instead.
+        if dl.expired() {
+            return Err(ToolError::new(ErrorCode::TimedOut, "no time was left to read it"));
+        }
+        let facts = page_facts(&mut client, &dl)?;
         Ok((health, facts))
     })();
     // A question asked while we set up or read the page is held by the client: the page stopped
@@ -809,6 +817,14 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     // answer would take it for something said after.
     let r = match r {
         Err(_) if client.waiting_dialog().is_some() => {
+            seen.extend(client.take_events());
+            Ok((health_with_dialog(&client, &seen), Value::Null))
+        }
+        // The answer is given either way: a failure to read the page after it (out of time, a
+        // lost connection) is said with the answer, not returned as the tool failing, which would
+        // leave a retry nothing to answer.
+        Err(e) => {
+            unread = Some(e.message);
             seen.extend(client.take_events());
             Ok((health_with_dialog(&client, &seen), Value::Null))
         }
@@ -850,6 +866,10 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         format!(" The page is now at {shown}: \"{title}\".")
     };
     let dialogs = health.get("dialogs").cloned().unwrap_or_else(|| json!([]));
+    let now = match &unread {
+        Some(why) => format!(" The page wasn't read afterwards ({why})."),
+        None => now,
+    };
     let summary = format!("{verb} {what}{typed}.{now}{}{}", dialogs_said(&dialogs), next.as_ref().map(dialog_waiting_said).unwrap_or_default());
     let visitor = ctx.session.clean_room();
     let browser = site.handle();
@@ -873,7 +893,15 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         Some(_) => {
             ev.limitation(waiting_limitation()).coverage(Coverage { status: CoverageStatus::Partial, examined: Some(0), total: Some(1), next_offset: None })
         }
-        None => ev.coverage(Coverage::complete(1)),
+        None => match &unread {
+            Some(why) => ev
+                .limitation(Limitation::new(
+                    "page_unread",
+                    format!("The answer was given, but the page wasn't read afterwards ({why}); open the website again with web_site_open to see where it is."),
+                ))
+                .coverage(Coverage { status: CoverageStatus::Partial, examined: Some(0), total: Some(1), next_offset: None }),
+            None => ev.coverage(Coverage::complete(1)),
+        },
     };
     Ok(ToolOutput::evidence(ev.build()?))
 }
@@ -2374,13 +2402,18 @@ mod tests {
                     loaded.store(false, Ordering::SeqCst);
                     let (w2, loaded2) = (w.clone(), loaded.clone());
                     std::thread::spawn(move || {
-                        for (ms, v) in timed {
+                        let last = timed.len().saturating_sub(1);
+                        for (i, (ms, v)) in timed.into_iter().enumerate() {
                             std::thread::sleep(Duration::from_millis(ms));
+                            // Done before the last event goes out, so facts asked for once it
+                            // arrives can't find the flag still unset.
+                            if i == last {
+                                loaded2.store(true, Ordering::SeqCst);
+                            }
                             if let Ok(mut out) = w2.lock() {
                                 send_frame(&mut out, v);
                             }
                         }
-                        loaded2.store(true, Ordering::SeqCst);
                     });
                 }
                 turn += 1;
@@ -2434,6 +2467,27 @@ mod tests {
         assert_eq!(asked["result"]["dialog_open"]["message"], "Are you sure?", "{asked}");
         let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
         assert_eq!(done["result"]["title"], "Done", "F's load from before the second question was waited for: {done}");
+    }
+
+    /// #2019 review: once the answer is given, failing to read the page after it is said with the
+    /// answer, not returned as the tool failing (a retry would find nothing left to answer).
+    #[test]
+    fn an_answer_is_reported_even_when_the_page_cant_be_read_after() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            // The browser goes away as the page is about to be read.
+            reply_until(s, |m| m["method"] == "Runtime.evaluate");
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        });
+        let e = engine_held(client, &ep);
+        let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["answered"]["accept"], true, "{done}");
+        assert_eq!(done["coverage"]["status"], "partial", "{done}");
+        assert!(done["limitations"].as_array().unwrap().iter().any(|l| l["code"] == "page_unread" || l["id"] == "page_unread"), "{}", done["limitations"]);
+        assert!(done["summary"].as_str().unwrap().contains("wasn't read afterwards"), "{}", done["summary"]);
+        assert_eq!(stored_health(&e)["dialogs"][0]["answered"], "accepted");
     }
 
     /// #2019 review: an answer that runs out of time keeps the question for another try, and the

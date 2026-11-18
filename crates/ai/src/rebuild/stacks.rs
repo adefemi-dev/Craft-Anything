@@ -91,9 +91,14 @@ fn parse(text: &str) -> Result<Table, toml::de::Error> {
 
 /// A request as `asked_by` phrases are matched: lower-case words, punctuation turned into
 /// spaces, padded with spaces (`"Use Next.js, shadcn/ui"` → `" use next js shadcn ui "`). "C#"
-/// reads "csharp", since without its `#` it would be C.
+/// reads "csharp", since without its `#` it would be C, and ".NET" as a word of its own reads
+/// "dotnet", since without its dot it would be "net revenue"'s net.
 pub fn words(request: &str) -> String {
-    let lower = request.to_lowercase().replace("c#", "csharp");
+    let lower = format!(" {}", request.to_lowercase())
+        .replace("c#", "csharp")
+        .replace(" .net", " dotnet")
+        .replace("(.net", "( dotnet")
+        .replace("asp.net", "asp dotnet");
     format!(" {} ", lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
 }
 
@@ -154,11 +159,15 @@ pub fn toolchain_for(stack: &str, app: &std::path::Path) -> Option<&'static Tool
 /// site that mentions Electron) the recorded stack stays.
 pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path) -> Option<&'static str> {
     let new = own_toolchain(asked, app)?;
-    let uses = &get(asked)?.uses;
-    if !uses.is_empty() {
-        let mut deps = craft_anything_engine::outputs::npm_dependencies(app);
-        deps.extend(craft_anything_engine::outputs::cargo_dependencies(app));
-        if !uses.iter().any(|d| deps.contains(d)) {
+    let s = get(asked)?;
+    if !s.uses.is_empty() {
+        // Only the new language's own file counts: a Cargo key named `phaser` isn't npm's Phaser.
+        let deps = match new.name.as_str() {
+            "Node.js" => craft_anything_engine::outputs::npm_dependencies(app),
+            "Rust" => craft_anything_engine::outputs::cargo_dependencies(app),
+            _ => Default::default(),
+        };
+        if !s.uses.iter().any(|d| deps.contains(d)) || !s.needs.iter().all(|d| deps.contains(d)) {
             return None;
         }
     }
@@ -357,6 +366,16 @@ mod tests {
         assert_eq!(asked_for(&words("sign in, go to settings")), None, "the verb \"go\" isn't Go");
         assert_eq!(asked_for(&words("written in javascript")).map(|s| s.name.as_str()), Some("React + TypeScript (Vite)"), "JavaScript isn't Java");
         assert_eq!(asked_for(&words("a tool in C")), None, "C isn't C#");
+        for r in ["Rewrite this from Python to Go.", "port it from Rust to Go", "rewrite this in Go"] {
+            assert_eq!(asked_for(&words(r)).map(|s| s.name.as_str()), Some("Go"), "{r}");
+        }
+        assert_eq!(asked_for(&words("we're ready to go")), None);
+        for r in ["Add a table with net revenue", "use the money in net terms", "link to example.net"] {
+            assert_eq!(asked_for(&words(r)), None, "{r}");
+        }
+        for r in ["rewrite it in .NET", "an ASP.NET site", "C# (.NET) please", ".NET 9"] {
+            assert_eq!(asked_for(&words(r)).map(|s| s.name.as_str()), Some("C# (.NET)"), "{r}");
+        }
     }
 
     /// Review of #2099: what shows a move, and what mustn't undo one.
@@ -373,6 +392,16 @@ mod tests {
         assert_eq!(moved_to("Rust + macroquad", "Electron", d.path()), None);
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"electron": "39"}}"#).unwrap();
         assert_eq!(moved_to("Rust + macroquad", "Electron", d.path()), Some("Electron"));
+        // React needs React as well as Vite: a Vue app built with Vite isn't one.
+        std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"vue": "3"}, "devDependencies": {"vite": "7"}}"#).unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path()), None);
+        std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"react": "19"}, "devDependencies": {"vite": "7"}}"#).unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path()), Some("React + TypeScript (Vite)"));
+        // Only the new language's own file counts: a Cargo key named phaser isn't npm's Phaser.
+        let cargo = tempfile::tempdir().unwrap();
+        std::fs::write(cargo.path().join("Cargo.toml"), "[dependencies]\nphaser = \"1\"\n").unwrap();
+        std::fs::write(cargo.path().join("package.json"), r#"{"dependencies": {"lodash": "4"}}"#).unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "Phaser", cargo.path()), None);
         // A Python build keeps its stack beside an old Vite package.json; a Vite one doesn't hold.
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"vite": "7"}}"#).unwrap();
         assert!(holds_its_language("Python", d.path()));

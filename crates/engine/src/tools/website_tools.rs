@@ -13,7 +13,7 @@ use super::native_common::spec;
 use super::site_sign_in;
 use super::web_common::{self, Browser, LaunchOptions, ProfileChoice};
 use crate::tool::{Caller, Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
-use craft_anything_engines::cdp::{self, CdpClient, CdpEvent, Deadline, Endpoint, PAGE_MAX_MESSAGE};
+use craft_anything_engines::cdp::{self, CdpClient, CdpEvent, Deadline, DialogAnswer, Endpoint, PAGE_MAX_MESSAGE};
 use craft_anything_evidence::{
     Authority, Confidence, Coverage, CoverageStatus, ErrorCode, EvidenceBuilder, Limitation, Location, Subject, ToolError, sha256_hex,
 };
@@ -552,12 +552,49 @@ fn wait_for_page(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent
         done = events.iter().any(|e| e.method == "Page.loadEventFired");
         keep(events);
     }
-    if client.waiting_dialog().is_none() {
-        let settle = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
-        client.pump_until(&settle)?;
+    // In slices, so a question asked while the page settles ends the wait too.
+    let settled = std::time::Instant::now() + Duration::from_millis(settle_ms.min(30_000));
+    loop {
+        let left = settled.saturating_duration_since(std::time::Instant::now());
+        if client.waiting_dialog().is_some() || left.is_zero() || dl.expired() {
+            break;
+        }
+        client.pump_until(&Deadline::new(left.min(Duration::from_millis(250)), crate::tool::CancelToken::default()))?;
         keep(client.take_events());
     }
     Ok(())
+}
+
+/// The stored health of a page whose held question was just answered (`accept`): that question's
+/// `waiting` becomes the answer given, and what the page reported after it (`after`, a
+/// [`page_health`]) is added, with the question it asks next, if any, as `dialog_open`.
+fn health_after_answer(stored: &Value, accept: bool, after: &Value) -> Value {
+    let mut health = match stored {
+        Value::Object(_) => stored.clone(),
+        _ => json!({"errors": [], "failed_requests": []}),
+    };
+    let Some(o) = health.as_object_mut() else { return health };
+    if let Some(d) = o.get_mut("dialogs").and_then(Value::as_array_mut).and_then(|ds| ds.iter_mut().rev().find(|d| d["answered"] == "waiting")) {
+        d["answered"] = json!(if accept { "accepted" } else { "dismissed" });
+    }
+    for (key, cap) in [("errors", 30), ("failed_requests", 50), ("dialogs", 30)] {
+        let Some(new) = after.get(key).and_then(Value::as_array) else { continue };
+        let list = o.entry(key).or_insert_with(|| json!([]));
+        if let Some(list) = list.as_array_mut() {
+            for item in new {
+                // An error is kept once per text, as page_health does.
+                let seen = key == "errors" && list.iter().any(|e| e["text"] == item["text"]);
+                if !seen && list.len() < cap {
+                    list.push(item.clone());
+                }
+            }
+        }
+    }
+    match after.get("dialog_open") {
+        Some(open) => o.insert("dialog_open".into(), open.clone()),
+        None => o.remove("dialog_open"),
+    };
+    health
 }
 
 /// [`page_health`] for what this client saw, with the question it holds as `dialog_open`.
@@ -708,12 +745,28 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     if let (Some(t), Some(o)) = (&p.prompt_text, answer.as_object_mut()) {
         o.insert("promptText".into(), json!(t));
     }
-    if let Err(e) = client.call("Page.handleJavaScriptDialog", answer, None, &dl) {
-        cleanup(&mut client, &dl);
+    match client.answer_dialog(answer, &dl) {
+        Ok(DialogAnswer::Answered) => {}
         // The browser says so when nothing is showing any more (the page closed it itself).
-        return Err(ToolError::new(ErrorCode::NotFound, "The page is no longer waiting on its question, so there's nothing to answer.")
-            .with_remediation("Open the website again with web_site_open to see where it is.")
-            .with_details(json!({"browser": e.message})));
+        Ok(DialogAnswer::NotShowing(e)) => {
+            cleanup(&mut client, &dl);
+            return Err(ToolError::new(ErrorCode::NotFound, "The page is no longer waiting on its question, so there's nothing to answer.")
+                .with_remediation("Open the website again with web_site_open to see where it is.")
+                .with_details(json!({"browser": e.message})));
+        }
+        // No word either way (out of time, stopped): the question may still be showing, and this
+        // connection is the only one that can answer it, so it's kept for another try.
+        Err(e) if client.connected() && client.waiting_dialog().is_some() => {
+            hold(&site, asked, client);
+            return Err(ToolError::new(e.code, format!("The browser didn't confirm the answer to the page's question: {}", e.message)).with_remediation(
+                format!("The page is still waiting on it: call {DIALOG_ANSWER_TOOL} again, with a longer timeout_secs if the browser is slow."),
+            ));
+        }
+        Err(e) => {
+            cleanup(&mut client, &dl);
+            return Err(ToolError::new(e.code, format!("The connection to the page was lost while answering its question: {}", e.message))
+                .with_remediation("Open the website again with web_site_open to see where it is."));
+        }
     }
     let asked = Some(asked);
     let r = (|| -> Result<(Value, Value), ToolError> {
@@ -736,6 +789,12 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     match &next {
         Some(open) => hold(&site, open.clone(), client),
         None => cleanup(&mut client, &dl),
+    }
+    // A later capture records the page's health: it gets the answer and what the page did after.
+    let after = r.as_ref().map(|(h, _)| h.clone()).unwrap_or(Value::Null);
+    if let Ok(mut h) = site.health.lock() {
+        let merged = health_after_answer(&h, p.accept, &after);
+        *h = merged;
     }
     let (health, facts) = r?;
     let here = facts.get("url").and_then(Value::as_str).map(str::to_string);
@@ -1882,6 +1941,100 @@ mod tests {
         assert_eq!(e.message, "The page is waiting for an answer to its prompt (\"Your team?\"), so nothing in it can be read.");
         assert!(e.remediation.as_deref().is_some_and(|r| r.contains(DIALOG_ANSWER_TOOL)), "{e:?}");
         assert_eq!(e.details.as_ref().map(|d| d[cdp::DIALOG_DETAIL].clone()), Some(prompt));
+    }
+
+    /// A capture after an answer records the answer and what the page reported after it, not the
+    /// health from before with the question still waiting.
+    #[test]
+    fn the_stored_health_takes_the_answer_and_what_followed() {
+        let stored = json!({
+            "errors": [{"kind": "console", "text": "old", "url": ""}],
+            "failed_requests": [],
+            "dialogs": [{"type": "alert", "message": "Hi", "answered": "accepted"}, {"type": "confirm", "message": "Continue?", "answered": "waiting"}],
+            "dialog_open": {"type": "confirm", "message": "Continue?"},
+        });
+        let after = json!({
+            "errors": [{"kind": "console", "text": "old", "url": ""}, {"kind": "console", "text": "after the answer", "url": ""}],
+            "failed_requests": [{"url": "https://ex.com/api", "status": 500, "type": "XHR"}],
+            "dialogs": [{"type": "prompt", "message": "Your team?", "answered": "waiting"}],
+            "dialog_open": {"type": "prompt", "message": "Your team?", "default_prompt": "Sales"},
+        });
+        let h = health_after_answer(&stored, true, &after);
+        assert_eq!(h["dialogs"][1]["answered"], "accepted", "{h}");
+        assert_eq!(h["dialogs"][2]["message"], "Your team?");
+        assert_eq!(h["errors"].as_array().map(Vec::len), Some(2), "each text once: {h}");
+        assert_eq!(h["errors"][1]["text"], "after the answer");
+        assert_eq!(h["failed_requests"][0]["status"], 500);
+        assert_eq!(h["dialog_open"]["type"], "prompt", "the next question is the one open");
+
+        let quiet = health_after_answer(&stored, false, &json!({"errors": [], "failed_requests": []}));
+        assert_eq!(quiet["dialogs"][1]["answered"], "dismissed");
+        assert!(quiet.get("dialog_open").is_none(), "nothing open after the answer: {quiet}");
+        // An answer whose follow-up couldn't be read still settles the question.
+        let unread = health_after_answer(&stored, true, &Value::Null);
+        assert_eq!(unread["dialogs"][1]["answered"], "accepted");
+        assert!(unread.get("dialog_open").is_none());
+        assert_eq!(health_after_answer(&Value::Null, true, &after)["errors"].as_array().map(Vec::len), Some(2), "nothing stored before");
+    }
+
+    /// A page connection to a stand-in browser that sends `script`'s messages; no browser starts.
+    fn stand_in_page(script: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> CdpClient {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let text = String::from_utf8_lossy(&head).into_owned();
+            let key = text.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")).unwrap_or_default().trim().to_string();
+            let accept = {
+                use base64::Engine as _;
+                use sha1::{Digest, Sha1};
+                let mut h = Sha1::new();
+                h.update(key.as_bytes());
+                h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                base64::engine::general_purpose::STANDARD.encode(h.finalize())
+            };
+            let reply = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n");
+            s.write_all(reply.as_bytes()).unwrap();
+            script(&mut s);
+            // Stay connected until the client is done.
+            let _ = s.read(&mut [0u8; 1]);
+        });
+        let ep = cdp::parse_endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
+        let target = cdp::ws_target(&format!("ws://127.0.0.1:{port}/devtools/page/P"), &ep).unwrap();
+        let dl = Deadline::new(Duration::from_secs(5), crate::tool::CancelToken::default());
+        CdpClient::new(cdp::WsConn::connect(&target, 1 << 20, &dl).unwrap()).answering_notices()
+    }
+
+    /// Send one unmasked text frame, as a browser does.
+    fn send_frame(s: &mut std::net::TcpStream, v: Value) {
+        use std::io::Write;
+        let body = v.to_string().into_bytes();
+        let mut frame = vec![0x81u8, u8::try_from(body.len()).unwrap()];
+        frame.extend_from_slice(&body);
+        s.write_all(&frame).unwrap();
+    }
+
+    /// A question asked while the page settles ends the wait then, not at the end of the settle time.
+    #[test]
+    fn a_question_while_the_page_settles_ends_the_wait() {
+        let mut client = stand_in_page(|s| {
+            send_frame(s, json!({"method": "Page.loadEventFired", "params": {}}));
+            std::thread::sleep(Duration::from_millis(300));
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Leave a review?"}}));
+        });
+        let dl = Deadline::new(Duration::from_secs(30), crate::tool::CancelToken::default());
+        let mut seen = Vec::new();
+        let started = std::time::Instant::now();
+        wait_for_page(&mut client, 20_000, &mut seen, &dl).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "ended at the question: {:?}", started.elapsed());
+        assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("confirm")));
+        assert!(seen.iter().any(|e| e.method == cdp::DIALOG_OPENING), "the question is among the events read");
     }
 
     #[test]

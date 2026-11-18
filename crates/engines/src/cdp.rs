@@ -626,6 +626,15 @@ pub fn dialog_answer(opening: &Value) -> Value {
     json!({"accept": is_notice(opening)})
 }
 
+/// What became of [`CdpClient::answer_dialog`].
+#[derive(Debug)]
+pub enum DialogAnswer {
+    /// The page took the answer and went on.
+    Answered,
+    /// The browser refused: no dialog is showing (the page closed it itself). Its error is kept.
+    NotShowing(ToolError),
+}
+
 /// A CDP event: domain-qualified method and its params.
 #[derive(Debug, Clone)]
 pub struct CdpEvent {
@@ -672,6 +681,27 @@ impl CdpClient {
         self.dropped_events
     }
 
+    /// Whether the connection can still carry commands: false once the browser closed it or a
+    /// write or read on it failed. A call that only ran out of time leaves it open.
+    pub fn connected(&self) -> bool {
+        !self.conn.closed
+    }
+
+    /// Answer the question the page is waiting on with `Page.handleJavaScriptDialog` params
+    /// (`accept`, and `promptText` for a prompt). The browser's refusal (it says no dialog is
+    /// showing) is [`DialogAnswer::NotShowing`]; an error is a call that couldn't tell, such as
+    /// one out of time or on a lost connection, and [`Self::waiting_dialog`] still says what's held.
+    /// A new question the page asks before the reply means this one was answered.
+    pub fn answer_dialog(&mut self, answer: Value, dl: &Deadline) -> Result<DialogAnswer, ToolError> {
+        let asked_before = self.questions;
+        match self.request("Page.handleJavaScriptDialog", answer, None, dl) {
+            Ok(Ok(_)) => Ok(DialogAnswer::Answered),
+            Ok(Err(refused)) => Ok(DialogAnswer::NotShowing(refused)),
+            Err(_) if self.questions != asked_before => Ok(DialogAnswer::Answered),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Keep an event, answering it first when it's a dialog this client answers.
     fn on_event(&mut self, v: Value) {
         match v.get("method").and_then(Value::as_str) {
@@ -713,6 +743,12 @@ impl CdpClient {
 
     /// Send a command and wait for its reply, dispatching any events seen meanwhile into the queue.
     pub fn call(&mut self, method: &str, params: Value, session_id: Option<&str>, dl: &Deadline) -> Result<Value, ToolError> {
+        self.request(method, params, session_id, dl)?
+    }
+
+    /// [`Self::call`], keeping the browser's own error reply (inner) apart from a call that got no
+    /// reply (outer: refused, out of time, a lost connection or a question that stopped it).
+    fn request(&mut self, method: &str, params: Value, session_id: Option<&str>, dl: &Deadline) -> Result<Result<Value, ToolError>, ToolError> {
         // A page waiting on a question doesn't run anything else; only the answer gets through.
         if method != "Page.handleJavaScriptDialog"
             && let Some(d) = &self.waiting
@@ -742,13 +778,13 @@ impl CdpClient {
             if v.get("id").and_then(Value::as_u64) == Some(id) {
                 if let Some(err) = v.get("error") {
                     let m = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
-                    return Err(cdp_error(method, m).with_details(json!({"error": err})));
+                    return Ok(Err(cdp_error(method, m).with_details(json!({"error": err}))));
                 }
                 // Answered: the page goes on, even before its closed event arrives.
                 if method == "Page.handleJavaScriptDialog" {
                     self.waiting = None;
                 }
-                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                return Ok(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
             }
             // Anything else is an event or a reply to a different id: keep events, ignore stray replies.
             if v.get("method").is_some() {
@@ -983,6 +1019,40 @@ mod tests {
         let stopped = client.call("Runtime.evaluate", json!({}), None, &dl).unwrap_err();
         assert_eq!(stopped.details.as_ref().map(|d| d[DIALOG_DETAIL]["type"].clone()), Some(json!("prompt")));
         assert!(started.elapsed() < Duration::from_secs(2), "at once, not at the deadline");
+    }
+
+    /// An answer tells a refusal (no dialog showing) apart from a call that couldn't tell: one out
+    /// of time keeps the question and the connection, one on a lost connection says so.
+    #[test]
+    fn an_answer_tells_a_refusal_from_no_word() {
+        let mut client = stand_in(|s| {
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            // No reply to the first answer, so it runs out of time.
+            assert_eq!(receive(s)["method"], "Page.handleJavaScriptDialog");
+            // The next question comes before the second answer's reply: that one was answered.
+            assert_eq!(receive(s)["method"], "Page.handleJavaScriptDialog");
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": ""}}));
+            // The third is refused: the page closed the prompt itself.
+            let third = receive(s);
+            send(s, json!({"id": third["id"], "error": {"code": -32000, "message": "No dialog is showing"}}));
+            // Then the browser goes away.
+        })
+        .answering_notices();
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        let short = Deadline::new(Duration::from_millis(300), CancelToken::default());
+        let late = client.answer_dialog(json!({"accept": true}), &short).unwrap_err();
+        assert_eq!(late.code, ErrorCode::TimedOut, "{late:?}");
+        assert!(client.connected() && client.waiting_dialog().is_some(), "the question and its connection are kept for another try");
+        assert!(matches!(client.answer_dialog(json!({"accept": true}), &dl), Ok(DialogAnswer::Answered)));
+        assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("prompt")), "the next question is held");
+        match client.answer_dialog(json!({"accept": false}), &dl) {
+            Ok(DialogAnswer::NotShowing(e)) => assert!(e.message.contains("No dialog is showing"), "{}", e.message),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let lost = client.answer_dialog(json!({"accept": false}), &dl).unwrap_err();
+        assert_eq!(lost.code, ErrorCode::EngineMissing, "{lost:?}");
+        assert!(!client.connected(), "a lost connection can't be held");
     }
 
     #[test]

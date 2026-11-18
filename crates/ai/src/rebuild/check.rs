@@ -489,7 +489,7 @@ func TestAnswer(t *testing.T) {
         std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
         std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"game\"\n").unwrap();
         let note = build_check(d.path(), "app/", "Python", None, &stop).1;
-        assert!(!note.to_lowercase().contains("cargo"), "{note}");
+        assert!(!note.to_lowercase().contains("cargo") && note.contains("python"), "Python's build ran: {note}");
         let note = build_check(d.path(), "app/", "Rust + macroquad", None, &stop).1;
         assert!(note.to_lowercase().contains("cargo"), "a Rust stack still builds with Cargo: {note}");
     }

@@ -90,9 +90,10 @@ fn parse(text: &str) -> Result<Table, toml::de::Error> {
 }
 
 /// A request as `asked_by` phrases are matched: lower-case words, punctuation turned into
-/// spaces, padded with spaces (`"Use Next.js, shadcn/ui"` → `" use next js shadcn ui "`).
+/// spaces, padded with spaces (`"Use Next.js, shadcn/ui"` → `" use next js shadcn ui "`). "C#"
+/// reads "csharp", since without its `#` it would be C.
 pub fn words(request: &str) -> String {
-    let lower = request.to_lowercase();
+    let lower = request.to_lowercase().replace("c#", "csharp");
     format!(" {} ", lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
 }
 
@@ -126,10 +127,18 @@ pub fn used_in(app: &std::path::Path) -> Option<&'static Stack> {
     catalogue().iter().find(|s| s.uses.iter().any(|d| deps.contains(d)))
 }
 
-/// The toolchain `stack` is written in, when its files are in `app`.
+/// The toolchain `stack` is written in, when its files are in `app` (a manifest, or a launch file
+/// such as `main.py` for a script with none).
 fn own_toolchain(stack: &str, app: &std::path::Path) -> Option<&'static Toolchain> {
     let tools = craft_anything_engine::toolchains::catalogue();
-    get(stack)?.toolchains.iter().find_map(|name| tools.iter().find(|t| t.name == *name).filter(|t| t.is_in(app)))
+    let here = |t: &&Toolchain| t.is_in(app) || t.has_entrypoint(app);
+    get(stack)?.toolchains.iter().find_map(|name| tools.iter().find(|t| t.name == *name).filter(here))
+}
+
+/// Whether `stack` is a language other than Node.js whose files are still in `app`: a
+/// package.json left from before a move then says nothing about what the build uses.
+pub fn holds_its_language(stack: &str, app: &std::path::Path) -> bool {
+    own_toolchain(stack, app).is_some_and(|t| t.name != "Node.js")
 }
 
 /// The toolchain `app` is built with: the recorded stack's when its files are there, since a
@@ -140,10 +149,19 @@ pub fn toolchain_for(stack: &str, app: &std::path::Path) -> Option<&'static Tool
 }
 
 /// `asked`, the stack a follow-up request names, when the build moved to it: its files are in
-/// `app` and it is written in another language than `stack`. Within one language (a Vite site
-/// that mentions Electron) the recorded stack stays.
+/// `app`, with its own dependencies when it has some (a package.json for Next.js isn't
+/// Electron), and it is written in another language than `stack`. Within one language (a Vite
+/// site that mentions Electron) the recorded stack stays.
 pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path) -> Option<&'static str> {
     let new = own_toolchain(asked, app)?;
+    let uses = &get(asked)?.uses;
+    if !uses.is_empty() {
+        let mut deps = craft_anything_engine::outputs::npm_dependencies(app);
+        deps.extend(craft_anything_engine::outputs::cargo_dependencies(app));
+        if !uses.iter().any(|d| deps.contains(d)) {
+            return None;
+        }
+    }
     (!get(stack).is_some_and(|s| s.toolchains.contains(&new.name))).then_some(asked)
 }
 
@@ -318,12 +336,14 @@ mod tests {
     /// in it; Java by whichever of Maven and Gradle the builder used.
     #[test]
     fn a_build_moved_to_go_csharp_or_java_is_checked_in_it() {
-        for (request, stack, file) in [
-            ("now rewrite it in golang", "Go", "go.mod"),
-            ("rewrite it in .NET", "C# (.NET)", "Game.csproj"),
-            ("make it a C sharp app", "C# (.NET)", "Game.sln"),
-            ("redo this in Java", "Java", "pom.xml"),
-            ("redo this in Java", "Java", "build.gradle.kts"),
+        for (request, stack, file, tool) in [
+            ("now rewrite it in golang", "Go", "go.mod", "Go"),
+            ("Rewrite it in Go.", "Go", "go.mod", "Go"),
+            ("rewrite it in .NET", "C# (.NET)", "Game.csproj", ".NET"),
+            ("make it a C sharp app", "C# (.NET)", "Game.sln", ".NET"),
+            ("Rewrite it in C#", "C# (.NET)", "Game.csproj", ".NET"),
+            ("redo this in Java", "Java", "pom.xml", "Maven"),
+            ("redo this in Java", "Java", "build.gradle.kts", "Gradle"),
         ] {
             let d = tempfile::tempdir().unwrap();
             std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
@@ -332,11 +352,39 @@ mod tests {
             assert_eq!(moved_to("Rust + macroquad", stack, d.path()), None, "{stack}: nothing of it yet");
             std::fs::write(d.path().join(file), "").unwrap();
             assert_eq!(moved_to("Rust + macroquad", stack, d.path()), Some(stack), "{file}");
-            let built_with = toolchain_for(stack, d.path()).map(|t| t.name.as_str());
-            assert_ne!(built_with, Some("Rust"), "{file}: not the Cargo.toml left behind");
+            assert_eq!(toolchain_for(stack, d.path()).map(|t| t.name.as_str()), Some(tool), "{file}: not the Cargo.toml left behind");
         }
         assert_eq!(asked_for(&words("sign in, go to settings")), None, "the verb \"go\" isn't Go");
         assert_eq!(asked_for(&words("written in javascript")).map(|s| s.name.as_str()), Some("React + TypeScript (Vite)"), "JavaScript isn't Java");
+        assert_eq!(asked_for(&words("a tool in C")), None, "C isn't C#");
+    }
+
+    /// Review of #2099: what shows a move, and what mustn't undo one.
+    #[test]
+    fn what_shows_a_move_and_what_keeps_it() {
+        // A Python script with no manifest is Python too.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
+        std::fs::write(d.path().join("main.py"), "print(1)\n").unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path()), Some("Python"));
+        assert_eq!(toolchain_for("Python", d.path()).map(|t| t.name.as_str()), Some("Python"));
+        // A package.json for Next.js is no move to Electron; one that lists electron is.
+        std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"next": "16"}}"#).unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path()), None);
+        std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"electron": "39"}}"#).unwrap();
+        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path()), Some("Electron"));
+        // A Python build keeps its stack beside an old Vite package.json; a Vite one doesn't hold.
+        std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"vite": "7"}}"#).unwrap();
+        assert!(holds_its_language("Python", d.path()));
+        assert!(!holds_its_language("React + TypeScript (Vite)", d.path()), "Node.js is what package.json says");
+        assert!(!holds_its_language("Go", d.path()), "no Go files");
+        // A project file is found in a folder of more than 256 entries.
+        let big = tempfile::tempdir().unwrap();
+        std::fs::write(big.path().join("Game.csproj"), "").unwrap();
+        for i in 0..300 {
+            std::fs::write(big.path().join(format!("asset{i}.txt")), "").unwrap();
+        }
+        assert_eq!(toolchain_for("C# (.NET)", big.path()).map(|t| t.name.as_str()), Some(".NET"));
     }
 
     #[test]

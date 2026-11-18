@@ -1020,6 +1020,7 @@ impl Worker {
                 if let Some(s) = moved.and_then(|s| stacks::moved_to(&ws.manifest.stack, s, &ws.app_dir())) {
                     ws.manifest.stack = s.to_string();
                 } else if game::Builder::from_stack(&ws.manifest.stack).is_none()
+                    && !stacks::holds_its_language(&ws.manifest.stack, &ws.app_dir())
                     && let Some(s) = stacks::used_in(&ws.app_dir())
                 {
                     ws.manifest.stack = s.name.clone();

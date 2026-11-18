@@ -67,23 +67,27 @@ toolchains = ["Python"]
 asked_by = [" in python", " with python"]
 found_by = ["pyproject.toml", "requirements.txt", "setup.py"]
 
-# " in go " alone would also match "sign in, go to…".
+# " in go " alone would also match "sign in, go to…": a request for Go says "it", "rewrite" or
+# "written" with it.
 [[stack]]
 name = "Go"
 toolchains = ["Go"]
-asked_by = [" in golang ", " with golang ", " using golang ", " in go lang "]
+asked_by = [" in golang ", " with golang ", " using golang ", " in go lang ", " it in go ", " rewrite in go ", " written in go ", " port it to go "]
+steps = "Use Go: put go.mod directly in app/ (not in a folder inside it), and run `go build ./...` from app/ until it succeeds."
 
-# "C#" reads " c ", the same as C, so only the names that can't be C ask for it.
+# "C#" reads "csharp" (`words`), so it isn't taken for C.
 [[stack]]
 name = "C# (.NET)"
 toolchains = [".NET"]
 asked_by = [" csharp ", " c sharp ", " dotnet ", " in net ", " with net ", " net core "]
+steps = "Use C# on .NET: put the .csproj (or the .sln) directly in app/ (not in a folder inside it), and run `dotnet build` from app/ until it succeeds."
 
 # The trailing space keeps " in javascript" out.
 [[stack]]
 name = "Java"
 toolchains = ["Maven", "Gradle"]
 asked_by = [" in java ", " with java ", " using java "]
+steps = "Use Java with Maven or Gradle: put pom.xml (or build.gradle / build.gradle.kts) directly in app/ (not in a folder inside it), and build from app/ (`mvn package`, or `gradle assemble`) until it succeeds."
 
 [[stack]]
 name = "React + TypeScript (Vite)"

@@ -40,9 +40,10 @@ pub struct Stack {
     pub program: Option<String>,
     #[serde(default)]
     pub program_from: Option<String>,
-    /// The toolchain its build is checked with (`Rust`, `Node.js`), by name in toolchains.toml.
+    /// The toolchains its build can be checked with (`Rust`; `Maven`, `Gradle`), by name in
+    /// toolchains.toml, the first whose files are there.
     #[serde(default)]
-    pub toolchain: Option<String>,
+    pub toolchains: Vec<String>,
 }
 
 pub use craft_anything_engine::toolchains::{Toolchain, found_in as toolchain_in};
@@ -127,8 +128,8 @@ pub fn used_in(app: &std::path::Path) -> Option<&'static Stack> {
 
 /// The toolchain `stack` is written in, when its files are in `app`.
 fn own_toolchain(stack: &str, app: &std::path::Path) -> Option<&'static Toolchain> {
-    let name = get(stack)?.toolchain.as_deref()?;
-    craft_anything_engine::toolchains::catalogue().iter().find(|t| t.name == name).filter(|t| t.is_in(app))
+    let tools = craft_anything_engine::toolchains::catalogue();
+    get(stack)?.toolchains.iter().find_map(|name| tools.iter().find(|t| t.name == *name).filter(|t| t.is_in(app)))
 }
 
 /// The toolchain `app` is built with: the recorded stack's when its files are there, since a
@@ -143,7 +144,7 @@ pub fn toolchain_for(stack: &str, app: &std::path::Path) -> Option<&'static Tool
 /// that mentions Electron) the recorded stack stays.
 pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path) -> Option<&'static str> {
     let new = own_toolchain(asked, app)?;
-    (get(stack).and_then(|s| s.toolchain.as_deref()) != Some(new.name.as_str())).then_some(asked)
+    (!get(stack).is_some_and(|s| s.toolchains.contains(&new.name))).then_some(asked)
 }
 
 /// The stack a folder of the person's own files is built with: an engine's project file says
@@ -263,9 +264,8 @@ mod tests {
         assert_eq!(get("Unity").and_then(|s| s.engine.as_deref()), Some("unity"));
         let tools = craft_anything_engine::toolchains::catalogue();
         for s in catalogue() {
-            let t = s.toolchain.as_deref();
-            assert!(t.is_none_or(|t| tools.iter().any(|c| c.name == t)), "{} names no toolchain in toolchains.toml", s.name);
-            assert_eq!(s.program.is_some(), t == Some("Rust"), "{}: every Rust stack, and only those, needs cargo", s.name);
+            assert!(s.toolchains.iter().all(|t| tools.iter().any(|c| c.name == *t)), "{} names a toolchain not in toolchains.toml", s.name);
+            assert_eq!(s.program.is_some(), s.toolchains == ["Rust"], "{}: every Rust stack, and only those, needs cargo", s.name);
         }
         assert!(parse("[[stack]]\nname = 3").is_err(), "a broken table is an error, not a panic");
         for l in &table().library {
@@ -312,6 +312,31 @@ mod tests {
         assert_eq!(moved_to("Python", "Python", d.path()), None, "already recorded");
         std::fs::write(d.path().join("package.json"), "{}").unwrap();
         assert_eq!(moved_to("React + TypeScript (Vite)", "Electron", d.path()), None, "one language: the stack stays");
+    }
+
+    /// Go, C# and Java have stacks too, so a build moved to one of them is recorded and checked
+    /// in it; Java by whichever of Maven and Gradle the builder used.
+    #[test]
+    fn a_build_moved_to_go_csharp_or_java_is_checked_in_it() {
+        for (request, stack, file) in [
+            ("now rewrite it in golang", "Go", "go.mod"),
+            ("rewrite it in .NET", "C# (.NET)", "Game.csproj"),
+            ("make it a C sharp app", "C# (.NET)", "Game.sln"),
+            ("redo this in Java", "Java", "pom.xml"),
+            ("redo this in Java", "Java", "build.gradle.kts"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
+            let asked = asked_for(&words(request)).map(|s| s.name.as_str());
+            assert_eq!(asked, Some(stack), "{request}");
+            assert_eq!(moved_to("Rust + macroquad", stack, d.path()), None, "{stack}: nothing of it yet");
+            std::fs::write(d.path().join(file), "").unwrap();
+            assert_eq!(moved_to("Rust + macroquad", stack, d.path()), Some(stack), "{file}");
+            let built_with = toolchain_for(stack, d.path()).map(|t| t.name.as_str());
+            assert_ne!(built_with, Some("Rust"), "{file}: not the Cargo.toml left behind");
+        }
+        assert_eq!(asked_for(&words("sign in, go to settings")), None, "the verb \"go\" isn't Go");
+        assert_eq!(asked_for(&words("written in javascript")).map(|s| s.name.as_str()), Some("React + TypeScript (Vite)"), "JavaScript isn't Java");
     }
 
     #[test]

@@ -2167,9 +2167,10 @@ Gaps found while using the app for real projects.
       moved out (#1837): record the stack from what was built for every toolchain, and check
       with that
       — claimed: justinjohn0306, branch bugfix/r2.9-check-the-stack-that-was-built
-- [ ] A move to a language with no stack in stacks.toml (Go, .NET, Java) is still checked with
+- [x] A move to a language with no stack in stacks.toml (Go, .NET, Java) is still checked with
       the old manifest's toolchain while it's there: only a follow-up naming a stack moves the
-      record
+      record. Go, C# (.NET) and Java (Maven or Gradle) now have stacks; the other toolchains
+      (Make) have no language to ask for
 - [x] One design system for the desktop app: a typed scale (text sizes, gaps, padding, icon and
       control sizes) in `theme.rs`, one set of buttons (primary, secondary, ghost, danger),
       switches and fields in `widgets.rs`, and every screen moved onto them, so sizes and spacing

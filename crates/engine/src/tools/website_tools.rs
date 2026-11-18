@@ -288,8 +288,6 @@ struct HeldDialog {
     /// [`dialog_open`]: what it asks.
     open: Value,
     client: CdpClient,
-    /// The `accept` of an answer sent to it whose reply hadn't come ([`CdpClient::answer_unconfirmed`]).
-    sent: Option<bool>,
 }
 
 /// The question the open website's page is waiting on, if any.
@@ -299,12 +297,7 @@ fn held_dialog(site: &SiteBrowser) -> Option<Value> {
 
 /// Keep `client` until the question it saw is answered.
 fn hold(site: &SiteBrowser, open: Value, client: CdpClient) {
-    hold_answered(site, open, client, None);
-}
-
-/// [`hold`], noting the `accept` of an answer already sent to it and not confirmed yet.
-fn hold_answered(site: &SiteBrowser, open: Value, client: CdpClient, sent: Option<bool>) {
-    let old = site.held.lock().ok().and_then(|mut h| h.replace(HeldDialog { open, client, sent }));
+    let old = site.held.lock().ok().and_then(|mut h| h.replace(HeldDialog { open, client }));
     if let Some(old) = old {
         dismiss(old);
     }
@@ -325,6 +318,8 @@ fn release_held(site: &SiteBrowser) {
 /// page stuck, with nothing left that can answer it.
 fn dismiss(mut held: HeldDialog) {
     let quick = Deadline::new(Duration::from_secs(5), crate::tool::CancelToken::default());
+    // Cancel can make the page ask something else; that's dismissed as well while connected.
+    held.client.dismiss_from_now();
     let _ = held.client.call("Page.handleJavaScriptDialog", json!({"accept": false}), None, &quick);
     cleanup(&mut held.client, &quick);
 }
@@ -374,6 +369,17 @@ fn end_with(site: &SiteBrowser, mut client: CdpClient, e: ToolError, dl: &Deadli
             e
         }
     }
+}
+
+/// A capture a question stopped part-way: its folder already holds what was captured before it,
+/// and a capture never writes into an existing folder, so the retry needs a new one.
+fn capture_interrupted(e: ToolError, output_directory: &str) -> ToolError {
+    if e.details.as_ref().is_none_or(|d| d.get(cdp::DIALOG_DETAIL).is_none()) {
+        return e;
+    }
+    e.with_remediation(format!(
+        "Answer it with {DIALOG_ANSWER_TOOL} (accept: true agrees, false dismisses), then run web_site_capture again with a new output_directory: {output_directory} keeps what was captured before the question."
+    ))
 }
 
 fn dialog_refusal(open: &Value) -> ToolError {
@@ -744,7 +750,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     let dl = deadline(ctx, p.timeout_secs)?;
     let site = open_site(ctx, &dl)?;
     // Only the connection that saw the question can answer it (HeldDialog).
-    let Some(HeldDialog { open: asked, mut client, sent }) = take_held(&site) else {
+    let Some(HeldDialog { open: asked, mut client }) = take_held(&site) else {
         return Err(ToolError::new(ErrorCode::NotFound, "The page isn't waiting on a question, so there's nothing to answer.")
             .with_remediation("A question the website asks is reported as dialog_open by web_site_open or web_site_capture; answer it then."));
     };
@@ -756,7 +762,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     // isn't sent, so it can't land on a question the page asked since).
     let (taken, earlier) = match client.answer_dialog(answer, &dl) {
         Ok(DialogAnswer::Answered) => (p.accept, false),
-        Ok(DialogAnswer::AnsweredBefore) => (sent.unwrap_or(p.accept), true),
+        Ok(DialogAnswer::AnsweredBefore { accept }) => (accept.unwrap_or(p.accept), true),
         // The browser says so when nothing is showing any more (the page closed it itself).
         Ok(DialogAnswer::NotShowing(e)) => {
             cleanup(&mut client, &dl);
@@ -766,9 +772,10 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         }
         // No word either way (out of time, stopped): the question may still be showing, and this
         // connection is the only one that can answer it, so it's kept for another try.
-        Err(e) if client.connected() && client.waiting_dialog().is_some() => {
-            let sent = client.answer_unconfirmed().then(|| sent.unwrap_or(p.accept));
-            hold_answered(&site, asked, client, sent);
+        // The question may have closed before the reply (its closed event came first): the
+        // answer's outcome is still unread, and only this connection can read it.
+        Err(e) if client.connected() && (client.waiting_dialog().is_some() || client.answer_unconfirmed()) => {
+            hold(&site, asked, client);
             return Err(ToolError::new(e.code, format!("The browser didn't confirm the answer to the page's question: {}", e.message)).with_remediation(
                 format!("The page is still waiting on it: call {DIALOG_ANSWER_TOOL} again, with a longer timeout_secs if the browser is slow."),
             ));
@@ -870,10 +877,11 @@ fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpE
     let quiet = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
     let longest = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
     let mut loading = false;
-    while client.waiting_dialog().is_none() && !longest.expired() && !dl.expired() && (loading || !quiet.expired()) {
-        let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
-        client.pump_until(&slice)?;
-        for e in client.take_events() {
+    // The events that came while the answer and setup awaited their replies are read first, so
+    // no settle time (settle_ms: 0) skips only the extra wait, not what was already seen.
+    let mut queued = client.take_events();
+    loop {
+        for e in queued {
             match e.method.as_str() {
                 "Page.frameStartedLoading" => loading = true,
                 "Page.loadEventFired" | "Page.frameStoppedLoading" => loading = false,
@@ -885,8 +893,12 @@ fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpE
                 seen.push(e);
             }
         }
+        if client.waiting_dialog().is_some() || longest.expired() || dl.expired() || (!loading && quiet.expired()) {
+            return Ok(());
+        }
+        client.pump_until(&Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default()))?;
+        queued = client.take_events();
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1342,7 +1354,7 @@ fn web_site_capture(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, Tool
     let r = capture_into(ctx, &mut client, &out, &p, &dl);
     // A question the page asked mid-capture stops it: say what it asks and how to answer it.
     let r = match r {
-        Err(e) => return Err(end_with(&site, client, e, &dl)),
+        Err(e) => return Err(capture_interrupted(end_with(&site, client, e, &dl), &p.output_directory)),
         Ok(r) => r,
     };
     // Leave the page at the first (usually desktop) width for the tools that follow.
@@ -2113,7 +2125,7 @@ mod tests {
             version: "1.3".into(),
             url: Mutex::new("http://page.test/".into()),
             health: Mutex::new(health),
-            held: Mutex::new(Some(HeldDialog { open, client, sent: None })),
+            held: Mutex::new(Some(HeldDialog { open, client })),
             signed_in: None,
             sign_in_revision: None,
             _owner: Mutex::new(Browser::attached(ep, "Stand-in/1", "1.3")),
@@ -2172,6 +2184,79 @@ mod tests {
             "{h}"
         );
         assert!(h.get("dialog_open").is_none(), "{h}");
+    }
+
+    /// #2019 review: leaving a page dismisses a question asked in reply to the dismissal too,
+    /// instead of closing the only connection that could answer it.
+    #[test]
+    fn leaving_dismisses_a_question_the_dismissal_raised() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (mut client, _) = stand_in_page(move |s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Leave?"}}));
+            let first = read_frame(s).unwrap();
+            // Cancel makes the page ask again, before the reply.
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Really?"}}));
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            let answers: Vec<Value> = std::iter::from_fn(|| reply_until(s, |m| m["method"] == "Page.handleJavaScriptDialog")).collect();
+            let _ = tx.send((first, answers));
+        });
+        client.pump_until(&Deadline::new(Duration::from_millis(500), crate::tool::CancelToken::default())).unwrap();
+        let open = dialog_open(client.waiting_dialog().unwrap());
+        dismiss(HeldDialog { open, client });
+        let (first, answers) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(first["params"], json!({"accept": false}));
+        assert_eq!(answers.iter().map(|a| a["params"].clone()).collect::<Vec<_>>(), vec![json!({"accept": false})], "the second question is dismissed too");
+    }
+
+    /// #2019 review: when the question closes before the answer's reply and the reply is late, the
+    /// connection is kept and the next try reads what the answer did.
+    #[test]
+    fn an_answer_whose_question_closed_first_is_still_read() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"method": cdp::DIALOG_CLOSED, "params": {"result": true}}));
+            std::thread::sleep(Duration::from_millis(1500));
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        let late = answer(&e, json!({"accept": true, "timeout_secs": 1})).unwrap_err();
+        assert_eq!(late.code, ErrorCode::TimedOut, "kept for another try, not a lost connection: {late:?}");
+        let read = answer(&e, json!({"accept": false, "settle_ms": 100})).unwrap();
+        assert_eq!(read["result"]["answered"], json!({"dialog": {"type": "confirm", "message": "Continue?"}, "accept": true, "earlier": true}), "{read}");
+        assert_eq!(read["result"]["title"], "Done");
+    }
+
+    /// #2019 review: what the page reported while the answer and setup awaited replies is kept,
+    /// even with no settle time.
+    #[test]
+    fn events_before_the_settle_are_kept_with_no_settle_time() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            send_frame(
+                s,
+                json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"type": "string", "value": "after the answer"}]}}),
+            );
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        answer(&e, json!({"accept": true, "settle_ms": 0})).unwrap();
+        let h = stored_health(&e);
+        assert!(h["errors"].as_array().unwrap().iter().any(|x| x["text"] == "after the answer"), "{h}");
+    }
+
+    /// #2019 review: a capture a question stopped says to run again into a new folder, since its
+    /// own folder already holds part of the capture; other errors keep their own advice.
+    #[test]
+    fn an_interrupted_capture_is_retried_in_a_new_folder() {
+        let asked = capture_interrupted(dialog_refusal(&json!({"type": "confirm", "message": "Continue?"})), "out/capture");
+        let fix = asked.remediation.unwrap_or_default();
+        assert!(fix.contains(DIALOG_ANSWER_TOOL) && fix.contains("new output_directory") && fix.contains("out/capture"), "{fix}");
+        let other = ToolError::new(ErrorCode::ProgramFailed, "screenshot failed").with_remediation("Try again.");
+        assert_eq!(capture_interrupted(other, "out/capture").remediation.as_deref(), Some("Try again."));
     }
 
     /// #2019 review: an answer that runs out of time keeps the question for another try, and the

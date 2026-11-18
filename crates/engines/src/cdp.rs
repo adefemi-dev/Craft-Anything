@@ -604,6 +604,8 @@ struct Unsettled {
     asked_before: u64,
     /// Its reply once seen: taken, or the browser's refusal.
     reply: Option<Result<(), ToolError>>,
+    /// Its `accept`, so what the page took can be said if it was taken.
+    accept: Option<bool>,
 }
 
 /// Which of a page's own dialogs a client answers by itself.
@@ -647,8 +649,8 @@ pub enum DialogAnswer {
     /// The page took the answer and went on.
     Answered,
     /// An earlier answer, sent but not confirmed when its call ended, turned out to be taken; this
-    /// one wasn't sent, so it can't land on a question asked since.
-    AnsweredBefore,
+    /// one wasn't sent, so it can't land on a question asked since. `accept` is the one the page took.
+    AnsweredBefore { accept: Option<bool> },
     /// The browser refused: no dialog is showing (the page closed it itself). Its error is kept.
     NotShowing(ToolError),
 }
@@ -709,6 +711,13 @@ impl CdpClient {
         self.dropped_events
     }
 
+    /// From now on, dismiss every dialog the page opens (alerts and leave-page questions still
+    /// accepted, [`dialog_answer`]), for leaving a page: a question asked in reply to the one being
+    /// dismissed is answered too, rather than left with nothing to answer it.
+    pub fn dismiss_from_now(&mut self) {
+        self.dialogs = Dialogs::All;
+    }
+
     /// Whether an answer was sent and its outcome isn't known yet: the next
     /// [`Self::answer_dialog`] reads it instead of sending another.
     pub fn answer_unconfirmed(&self) -> bool {
@@ -744,17 +753,18 @@ impl CdpClient {
     /// Read until the [`Unsettled`] answer's outcome is known: its reply, or a new question.
     fn settle_earlier_answer(&mut self, dl: &Deadline) -> Result<DialogAnswer, ToolError> {
         loop {
-            let Some(u) = &mut self.unsettled else { return Ok(DialogAnswer::AnsweredBefore) };
+            let Some(u) = &mut self.unsettled else { return Ok(DialogAnswer::AnsweredBefore { accept: None }) };
+            let accept = u.accept;
             if let Some(reply) = u.reply.take() {
                 self.unsettled = None;
                 return Ok(match reply {
-                    Ok(()) => DialogAnswer::AnsweredBefore,
+                    Ok(()) => DialogAnswer::AnsweredBefore { accept },
                     Err(refused) => DialogAnswer::NotShowing(refused),
                 });
             }
             if self.questions != u.asked_before {
                 self.unsettled = None;
-                return Ok(DialogAnswer::AnsweredBefore);
+                return Ok(DialogAnswer::AnsweredBefore { accept });
             }
             let raw = match self.conn.read_message(dl) {
                 Ok(Some(raw)) => raw,
@@ -849,6 +859,7 @@ impl CdpClient {
         let asked_before = self.questions;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
+        let accept = params.get("accept").and_then(Value::as_bool);
         let mut msg = json!({"id": id, "method": method, "params": params});
         if let Some(s) = session_id
             && let Some(o) = msg.as_object_mut()
@@ -860,7 +871,7 @@ impl CdpClient {
         let r = self.await_reply(id, method, asked_before, dl);
         // Sent, with no word back and no new question: what it did is read before another is sent.
         if method == "Page.handleJavaScriptDialog" && r.is_err() && self.questions == asked_before {
-            self.unsettled = Some(Unsettled { id, asked_before, reply: None });
+            self.unsettled = Some(Unsettled { id, asked_before, reply: None, accept });
         }
         r
     }
@@ -1136,7 +1147,7 @@ mod tests {
             // The retry sent nothing: the next answer to arrive is the one given to the prompt,
             // and it's refused (the page closed the prompt itself).
             let next = receive(s);
-            assert_eq!(next["params"]["accept"], false, "the retry's answer never reached the prompt: {next}");
+            assert_eq!(next["params"], json!({"accept": true, "promptText": "Design"}), "the retry's answer never reached the prompt: {next}");
             send(s, json!({"id": next["id"], "error": {"code": -32000, "message": "No dialog is showing"}}));
             // Then the browser goes away.
         })
@@ -1147,11 +1158,15 @@ mod tests {
         let late = client.answer_dialog(json!({"accept": true}), &short).unwrap_err();
         assert_eq!(late.code, ErrorCode::TimedOut, "{late:?}");
         assert!(client.connected() && client.waiting_dialog().is_some(), "the question and its connection are kept for another try");
-        assert!(matches!(client.answer_dialog(json!({"accept": true}), &dl), Ok(DialogAnswer::AnsweredBefore)), "the late answer was taken");
+        // The retry's own choice differs: what's reported is the answer the page took.
+        assert!(
+            matches!(client.answer_dialog(json!({"accept": false}), &dl), Ok(DialogAnswer::AnsweredBefore { accept: Some(true) })),
+            "the late answer was taken"
+        );
         // Its reply came first; the question after it arrives next.
         client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
         assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("prompt")), "the next question is held");
-        match client.answer_dialog(json!({"accept": false}), &dl) {
+        match client.answer_dialog(json!({"accept": true, "promptText": "Design"}), &dl) {
             Ok(DialogAnswer::NotShowing(e)) => assert!(e.message.contains("No dialog is showing"), "{}", e.message),
             other => panic!("expected a refusal, got {other:?}"),
         }

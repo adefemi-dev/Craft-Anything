@@ -2304,11 +2304,15 @@ Owner: open · Status: in progress
       subfolders read "0 files in 100 entries". Folders, links and files are now one list in path
       order before the cut, and no file after the cut is read
       — claimed: hichang4u, branch bugfix/r3.11-inventory-path-order
-- [ ] That path order is only the order of what the walk kept: the walk lists a folder's files before
-      opening its subfolders, so when the file limit stops it, a file inside an earlier folder
-      (`a/first.txt`) is dropped while later root files (`z1.txt`…) are kept, and sorting can't bring it
-      back (CodeRabbit on #2072). Walk in path order (open a folder where its name sorts), so the cut
-      is a prefix of the tree, with the same bounds on work and memory
+- [x] That path order was only the order of what the walk kept: the walk listed a folder's files
+      before opening its subfolders, so when the file limit stopped it, a file inside an earlier
+      folder (`a/first.txt`) was dropped while later root files (`z1.txt`…) were kept, and sorting
+      couldn't bring it back (CodeRabbit on #2072). The walk now opens a folder where its name sorts
+      in its parent, so a limit cuts the tree where a listing of it would end, and results are sorted
+      folder by folder (`path_order`: everything in `a` before `a-b.txt`). Only the listings of the
+      folders on the current path are held, within the same entry limit. Where a folder's own
+      listing is cut by the entry or path-byte limit, the names kept are still the ones the system
+      returned first
       — claimed: hichang4u, branch bugfix/r3.11-walk-path-order
 
 ### R3.12 Format parser correctness

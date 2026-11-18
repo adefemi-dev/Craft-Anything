@@ -943,6 +943,12 @@ a FIFO at that path could block the walk, and an unreadable or non-UTF-8 file lo
 limitation. Read it through the capped, regular-file-checked helper, keep the cap well above real
 ignore files, and name every skipped file in the evidence; an absent file is the only silent case.
 
+**An inventory's size used as a read limit.** The managed reconstruction check compared a file's
+inventoried size with its 64 MiB budget, then read the file whole; growth in between bypassed the
+budget. Use the capped regular-file reader with the remaining budget, which checks bytes read
+as well as metadata. Test growth after a real inventory, the aggregate limit and exact-limit
+inputs. When nothing can be read, keep the read failures and the walk cut in the error too.
+
 **A graph cap was silent for edges and complete in coverage.** The application graph dropped
 edges past `4 × max_nodes` with no counter, and `js_app_map` reported Complete even when nodes or
 edges had been cut. Count every unique dropped edge, name the cap in a limitation, and make
@@ -1009,6 +1015,11 @@ same PR as the change.
 for it locally, and CI's `cargo xtask i18n-coverage` failed: the app shows tool titles, so each
 needs a translation in every catalog. Run `cargo xtask i18n-coverage` for any PR that adds a tool
 or changes a title, not only for UI changes.
+
+**An inserted name became another placeholder.** Filling `{saved}` and then `{used}` with repeated
+replacements rewrites a saved builder named `{used}`. Fill every placeholder in one pass over the
+template (`platform::text::fill`, which `i18n::trf` uses), never by chained `replace` calls, so
+inserted names stay literal; test placeholder-looking names as well as ordinary ones.
 
 **A second lock in one statement.** `CliSpec { deep: !engine.session().clean_room(), logs: engine.session().config_dir(), … }`
 looked like two quick reads, but an unbound guard lives to the end of the statement, so the second

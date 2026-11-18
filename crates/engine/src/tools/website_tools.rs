@@ -878,20 +878,30 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     Ok(ToolOutput::evidence(ev.build()?))
 }
 
+/// Most frames tracked as loading after an answer; the wait is bounded by time as well.
+const MAX_LOADING_FRAMES: usize = 256;
+
 /// After an answer the page may go on loading (a navigation it asked about) or stay where it is:
 /// wait for a load that started, at most 45 s, and at least `settle_ms`.
 fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
     let quiet = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
     let longest = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
-    let mut loading = false;
+    // The frames still loading, by id: one frame (an iframe) stopping doesn't end another's load,
+    // and the page's load event ends them all. Bounded, as a page can start any number of frames.
+    let mut loading: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The events that came while the answer and setup awaited their replies are read first, so
     // no settle time (settle_ms: 0) skips only the extra wait, not what was already seen.
     let mut queued = client.take_events();
     loop {
         for e in queued {
             match e.method.as_str() {
-                "Page.frameStartedLoading" => loading = true,
-                "Page.loadEventFired" | "Page.frameStoppedLoading" => loading = false,
+                "Page.frameStartedLoading" if loading.len() < MAX_LOADING_FRAMES => {
+                    loading.insert(e.params["frameId"].as_str().unwrap_or_default().to_string());
+                }
+                "Page.frameStoppedLoading" => {
+                    loading.remove(e.params["frameId"].as_str().unwrap_or_default());
+                }
+                "Page.loadEventFired" => loading.clear(),
                 _ => {}
             }
             let wanted =
@@ -900,7 +910,7 @@ fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpE
                 seen.push(e);
             }
         }
-        if client.waiting_dialog().is_some() || longest.expired() || dl.expired() || (!loading && quiet.expired()) {
+        if client.waiting_dialog().is_some() || longest.expired() || dl.expired() || (loading.is_empty() && quiet.expired()) {
             return Ok(());
         }
         client.pump_until(&Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default()))?;
@@ -2358,16 +2368,22 @@ mod tests {
             };
             say(json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Leave for the next step?"}}));
             say(json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+            say(json!({"method": "Page.frameStartedLoading", "params": {"frameId": "G"}}));
             let first = read_frame(s).unwrap();
             say(json!({"id": first["id"], "result": {}}));
             // The load ends 800 ms later; facts read before then would be the half-loaded page.
             let loaded = Arc::new(AtomicBool::new(false));
             let (w2, loaded2) = (w.clone(), loaded.clone());
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(800));
+                // A child frame finishes first; the main frame is still loading.
+                std::thread::sleep(Duration::from_millis(300));
+                if let Ok(mut out) = w2.lock() {
+                    send_frame(&mut out, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "G"}}));
+                }
+                std::thread::sleep(Duration::from_millis(500));
                 if let Ok(mut out) = w2.lock() {
                     loaded2.store(true, Ordering::SeqCst);
-                    send_frame(&mut out, json!({"method": "Page.loadEventFired", "params": {}}));
+                    send_frame(&mut out, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "F"}}));
                 }
             });
             while let Some(m) = read_frame(s) {

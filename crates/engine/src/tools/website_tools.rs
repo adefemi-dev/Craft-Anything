@@ -758,11 +758,13 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     if let (Some(t), Some(o)) = (&p.prompt_text, answer.as_object_mut()) {
         o.insert("promptText".into(), json!(t));
     }
-    // What the client saw before the answer is kept, except the held question's own opening: it
-    // was reported when it was held, and read again after the answer it would be listed twice.
-    // A question that opens after the answer is a new one and is read as such.
-    let mut seen: Vec<CdpEvent> =
-        client.take_events().into_iter().filter(|e| !(e.method == cdp::DIALOG_OPENING && !cdp::is_notice(&e.params))).take(MAX_HEALTH_EVENTS).collect();
+    // What the client saw before the answer stays queued, except the held question's own opening:
+    // it was reported when it was held, and read again after the answer it would be listed twice.
+    // The rest is read after the answer (a load already under way included) and, if the answer
+    // isn't confirmed, stays with the held connection for the next try. A question that opens
+    // after the answer is a new one and is read as such.
+    client.forget_queued_questions();
+    let mut seen: Vec<CdpEvent> = Vec::new();
     // What the page took: this answer, or one sent before whose reply came late (then this one
     // isn't sent, so it can't land on a question the page asked since).
     let (taken, earlier) = match client.answer_dialog(answer, &dl) {
@@ -2316,6 +2318,71 @@ mod tests {
         let h = stored_health(&e);
         assert!(h["errors"].as_array().unwrap().iter().any(|x| x["text"] == "after the answer"), "{h}");
         assert_eq!(h["dialogs"][1], json!({"type": "prompt", "message": "Your team?", "answered": "waiting"}), "{h}");
+    }
+
+    /// #2019 review: what was queued before an answer that runs out of time stays with the held
+    /// question, so the try that reads the late outcome still reports it.
+    #[test]
+    fn events_queued_before_an_unconfirmed_answer_reach_the_retry() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            send_frame(
+                s,
+                json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"type": "string", "value": "before the answer"}]}}),
+            );
+            let first = read_frame(s).unwrap();
+            std::thread::sleep(Duration::from_millis(1500));
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            reply_until(s, |_| false);
+        });
+        let e = engine_held_as(client, &ep, false);
+        assert_eq!(answer(&e, json!({"accept": true, "timeout_secs": 1})).unwrap_err().code, ErrorCode::TimedOut);
+        let read = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(read["result"]["answered"]["earlier"], true, "{read}");
+        let h = stored_health(&e);
+        assert!(h["errors"].as_array().unwrap().iter().any(|x| x["text"] == "before the answer"), "{h}");
+        assert_eq!(h["dialogs"], json!([{"type": "confirm", "message": "Continue?", "answered": "accepted"}]), "{h}");
+    }
+
+    /// #2019 review: a load that started before the answer is waited for, so the page's facts
+    /// aren't read mid-load.
+    #[test]
+    fn a_load_under_way_before_the_answer_is_waited_for() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (client, ep) = stand_in_page(|s| {
+            let w = Arc::new(Mutex::new(s.try_clone().unwrap()));
+            let say = |v: Value| {
+                if let Ok(mut out) = w.lock() {
+                    send_frame(&mut out, v);
+                }
+            };
+            say(json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Leave for the next step?"}}));
+            say(json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+            let first = read_frame(s).unwrap();
+            say(json!({"id": first["id"], "result": {}}));
+            // The load ends 800 ms later; facts read before then would be the half-loaded page.
+            let loaded = Arc::new(AtomicBool::new(false));
+            let (w2, loaded2) = (w.clone(), loaded.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(800));
+                if let Ok(mut out) = w2.lock() {
+                    loaded2.store(true, Ordering::SeqCst);
+                    send_frame(&mut out, json!({"method": "Page.loadEventFired", "params": {}}));
+                }
+            });
+            while let Some(m) = read_frame(s) {
+                let result = if m["method"] == "Runtime.evaluate" {
+                    let title = if loaded.load(Ordering::SeqCst) { "Done" } else { "Loading" };
+                    json!({"result": {"type": "object", "value": {"url": "http://page.test/next", "title": title}}})
+                } else {
+                    json!({})
+                };
+                say(json!({"id": m["id"], "result": result}));
+            }
+        });
+        let e = engine_held_as(client, &ep, false);
+        let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["title"], "Done", "read after the load ended: {done}");
     }
 
     /// #2019 review: an answer that runs out of time keeps the question for another try, and the

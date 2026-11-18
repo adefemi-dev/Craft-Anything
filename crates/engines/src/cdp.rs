@@ -718,6 +718,13 @@ impl CdpClient {
         self.dialogs = Dialogs::All;
     }
 
+    /// Drop the queued openings of questions (`confirm`, `prompt`), keeping every other event in
+    /// order. Before an answer, the only one queued is the question being answered, already
+    /// reported; read again afterwards it would look like something the page asked after.
+    pub fn forget_queued_questions(&mut self) {
+        self.events.retain(|v| !(v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) && !is_notice(&v["params"])));
+    }
+
     /// Whether an answer was sent and its outcome isn't known yet: the next
     /// [`Self::answer_dialog`] reads it instead of sending another.
     pub fn answer_unconfirmed(&self) -> bool {

@@ -627,8 +627,15 @@ Owner: open · Status: todo
       saved builder that is off or gone and the AI building instead: the CLI prints it before the
       run, `rebuild_start` adds `builder_notice`, and an answered question carries it
       — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-headless-builder-notice`
-- [ ] The saved-builder replacement notice is English only for now; add it to the catalogs after a
-      native speaker checks the wording
+- [x] Add the saved-builder replacement notice on Make and at build starts to the UI catalogs;
+      Turkish wording reviewed and approved by native speaker @MacallanTheRoot, English unchanged
+      — claimed: MacallanTheRoot, branch fix/r5.5-localize-builder-replacement-notice
+- [ ] Native-speaker reviews of the saved-builder replacement notice in the other UI languages;
+      their catalog entries retain the existing English wording until reviewed
+- [x] Localize the replacement notice shown after Just ask using typed replacement names from the
+      answer (`builder_replacement.saved` and `.used`); `builder_notice` keeps its English wording
+      for headless callers. The UI reuses the existing catalog template and preserves literal names.
+      — claimed: MacallanTheRoot, branch bugfix/r5.5-just-ask-builder-notice — PR #2142
 - [x] Bound accumulated data across all lines of one server-sent event, so short lines cannot
       grow a streamed API response without limit
       — claimed: Afloat16, branch bugfix/r5.5-bounded-sse-events-20261103
@@ -1521,6 +1528,16 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
+- [x] `i18n::trf` filled placeholders with repeated replacements, so a value containing a later
+      placeholder was rewritten. It now fills them in one pass over the template: inserted names
+      and other values stay literal, and unknown names and stray braces are kept as written. The
+      R5.5 saved-builder notice uses it instead of its own split
+      — claimed: mansur-akhmadi, branch bugfix/r2.9-trf-literal-values
+- [x] The engine build steps (`rebuild::stacks`) filled `{editor}`, `{player}` and `{ext}` with
+      chained `replace` calls, so an editor path holding `{ext}` or `{player}` was rewritten. The
+      one-pass fill now lives in `platform::text::fill` (L2), which both the steps and
+      `i18n::trf` use, so the editor's path reaches the builder as it is
+      — claimed: mansur-akhmadi, branch bugfix/r2.9-stack-steps-literal-values
 - [x] Each project chooses, per kind of action, what the builder's approvals get (allow, ask or
       refuse): reading the web, commands, files outside the project, pushing and publishing,
       deleting outside the project, system changes, other tools. Unset kinds follow Auto mode as
@@ -2058,8 +2075,13 @@ Owner: open · Status: in progress
       folder or archive no longer shown is ignored, including its error; UI regressions cover both
       scopes and an ignored error
       — claimed: AlexJoaquimPereira, branch bugfix/r3.9-game-files-stale-results
-- [ ] Pick game A, B, then A again while the first A look is still running: the older A result can
-      still land after the newer one. Correlate each look with a request id, not only the path
+- [x] Pick game A, B, then A again while the first A look is still running: the older A result can
+      still land after the newer one. Done: each look and listing carries the job that asked for
+      it, and only the jobs the screen still waits for are applied, so a repeated pick ignores the
+      older answer; a folder whose name isn't text is refused with a message before a look starts.
+      UI regressions cover the same-folder re-pick through the app's dispatch, the refusal, and a
+      failed or superseded worker settling only its own spinner
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.9-game-files-request-ids
 - [x] Decode Unreal packed 10-bit normalized and 11-bit floating-point textures through the bounded picture exporter.
       — claimed: Afloat16, branch feature/r3.9-unreal-packed-textures-20261111
 - [x] Unreal: decode cooked half- and full-precision floating-point textures with the shared bounded pixel reader.
@@ -2269,10 +2291,23 @@ Owner: open · Status: in progress
       readable; inputs with the same folder name are told apart (`dist (input 2)`), and
       `apple_dylibs_resolve` is partial whenever its walk was cut. Tested on Windows with a folder
       held without sharing; the Unix path (no permission) runs in CI
-- [ ] `managed_reconstruction_check` stops reading `.cs` files at its file or size budget and says so
+- [x] `managed_reconstruction_check` stops reading `.cs` files at its file or size budget and says so
       in a note, but its coverage stays complete, so members declared only in an unread file read as
       missing in a complete check (CodeRabbit on #2106): carry the cut into coverage, apart from the
-      unlisted-folder limitation
+      unlisted-folder limitation. Coverage is now partial (no total) when the file or size budget
+      stops the reading, a `.cs` file can't be read, or the folder walk was cut short (a depth or
+      entry limit), as it already was for unlisted folders. The budget, size, depth and unreadable-file
+      cases are tested (the unreadable file through `walk_testing::close`, now also for a file; run
+      on macOS only, the Windows path is untried)
+      — claimed: mansur-akhmadi, branch bugfix/r3.11-reconstruction-check-cut-coverage
+- [x] `managed_reconstruction_check` caps actual source reads with the regular-file reader: a
+      single file gets 64 MiB, and each directory file gets only the remaining aggregate budget,
+      even if it grows after inventory or during the read. A size refusal stops reading and keeps
+      coverage partial. When no source is readable, the error carries the first five source-read
+      notes, a count of further notes, the walk cut and the existing unlisted-folder details.
+      Regression tests grow or remove real files after inventory and cover exact-limit/empty
+      files, oversized single files and bounded error details. Valid source handling is unchanged.
+      — claimed: MacallanTheRoot, branch bugfix/r3.11-bounded-managed-sources — PR #2144
 - [ ] `js_sources_restore` keeps every unlisted folder of every input in memory to name five of them:
       keep the count and the first five (CodeRabbit on #2106)
       — claimed: hichang4u, branch bugfix/r3.11-walk-gaps-named

@@ -1137,8 +1137,9 @@ pub(crate) mod walk_testing {
         _held: std::fs::File,
     }
 
-    /// Make `dir` fail to list for as long as the result lives: no permission on Unix, held
-    /// without sharing on Windows. `None` where that stops nothing (a test run as root).
+    /// Make `dir` fail to list (or a file fail to read) for as long as the result lives: no
+    /// permission on Unix, held without sharing on Windows. `None` where that stops nothing (a
+    /// test run as root).
     pub(crate) fn close(dir: &Path) -> Option<Closed> {
         #[cfg(unix)]
         let closed = {
@@ -1152,7 +1153,7 @@ pub(crate) mod walk_testing {
             // FILE_FLAG_BACKUP_SEMANTICS: what opening a folder takes.
             Closed { _held: std::fs::OpenOptions::new().read(true).share_mode(0).custom_flags(0x0200_0000).open(dir).unwrap() }
         };
-        let stops = std::fs::read_dir(dir).is_err();
+        let stops = if dir.is_dir() { std::fs::read_dir(dir).is_err() } else { std::fs::read(dir).is_err() };
         // Only root on Unix lists a folder it has no permission for; a test that returns early
         // anywhere else would pass without having looked at anything.
         assert!(stops || cfg!(unix), "{} is held without sharing and can still be listed", dir.display());

@@ -1,5 +1,6 @@
 # vi: original Vietnamese UI translations (address the person as "bạn"). Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	Mặc định (cài đặt riêng của nó)
 OpenCode default	Mặc định của OpenCode
 Model default	Mô hình mặc định
 Thinking depth	Mức độ suy nghĩ
@@ -304,6 +305,7 @@ Couldn't look through that folder.	Không thể duyệt thư mục đó.
 Couldn't open it.	Không thể mở nó.
 Couldn't open the folder.	Không thể mở thư mục.
 Couldn't open {}: {}	Không thể mở {}: {}
+Couldn't save your settings.	Không thể lưu cài đặt.
 Couldn't start a worker thread: {e}	Không thể khởi động luồng xử lý: {e}
 Couldn't start it.	Không thể khởi động nó.
 Coverage unknown	Chưa rõ mức bao phủ
@@ -985,6 +987,7 @@ Saved in	Đã lưu trong
 Saves space: copies the program and code, and shares dependencies and media with the project. A shared file rewritten in place changes here too.	Tiết kiệm dung lượng: sao chép chương trình và mã, còn các phần phụ thuộc và phương tiện thì dùng chung với dự án. Nếu một tệp dùng chung bị ghi đè trực tiếp, thay đổi cũng áp dụng ở đây.
 Say what you want	Nói bạn muốn gì
 Say what you want first.	Hãy nói bạn muốn gì trước.
+This applies once you choose something to recreate above.	Lựa chọn này áp dụng khi bạn chọn thứ cần tái tạo ở trên.
 Say what you want to make, or drop an app or file on the window to look inside it. Everything runs in Clean room mode unless you switch on Deep.	Hãy nói bạn muốn tạo gì, hoặc thả một ứng dụng hay tệp vào cửa sổ để xem bên trong. Mọi thứ chạy ở chế độ Phòng sạch trừ khi bạn bật Chuyên sâu.
 Screenshot	Ảnh chụp màn hình
 Screenshot a page	Chụp màn hình một trang
@@ -1190,6 +1193,7 @@ Use the projects folder	Dùng thư mục dự án
 Use this	Dùng cái này
 Use {name}	Dùng {name}
 Value flow	Luồng giá trị
+About	Giới thiệu
 Version	Phiên bản
 Waiting	Đang chờ
 Waiting for another build to finish: this one starts next.	Đang chờ một bản dựng khác xong: bản này sẽ bắt đầu tiếp theo.
@@ -1364,6 +1368,7 @@ your files there are the app, edited in place	các tệp của bạn ở đó ch
 {name} builds what you make; answers come from {brain}.	{name} xây dựng thứ bạn tạo; câu trả lời đến từ {brain}.
 {name} can't be attached: a message takes pictures up to 20 MB.	Không thể đính kèm {name}: mỗi tin nhắn nhận ảnh tối đa 20 MB.
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	Không thể đính kèm {name}: đây không phải ảnh PNG, JPEG, GIF hoặc WebP.
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} không thể bị giới hạn chỉ đọc, nên không được hỏi. Hãy hỏi bằng Claude Code hoặc bằng một AI có khóa API.
 {name} is ready	{name} đã sẵn sàng
 {name} is ready.	{name} đã sẵn sàng.
 {name} isn't available yet in this build.	{name} chưa có trong bản dựng này.
@@ -1443,6 +1448,7 @@ Zoom	Thu phóng
 Bring all to front	Đưa tất cả lên trước
 Drag to give the plan more or less room; double-click to reset	Kéo để mở rộng hoặc thu hẹp phần kế hoạch; nhấp đúp để đặt lại
 Copy the message	Sao chép tin nhắn
+Copy the version	Sao chép phiên bản
 Choose what the builder's approvals get	Chọn cách xử lý các phê duyệt của trình xây dựng
 Reading the web	Đọc web
 Other commands	Lệnh khác
@@ -1532,3 +1538,8 @@ e.g. http://192.168.1.20:8188	vd: http://192.168.1.20:8188
 on your server	trên máy chủ của bạn
 {n} checkpoints found	Tìm thấy {n} checkpoint
 Needs a ComfyUI address and checkpoint in Settings → Builds. Until then the game is built without them.	Cần địa chỉ ComfyUI và checkpoint trong Cài đặt → Các lượt xây dựng. Cho đến lúc đó, trò chơi được dựng mà không có chúng.
+Forget a website sign-in	Quên thông tin đăng nhập của một trang web
+Sign in to a website	Đăng nhập vào một trang web
+Some shared files could not be hard-linked and were copied instead ({size}).	Một số tệp chia sẻ không thể tạo liên kết cứng nên đã được sao chép ({size}).
+This server lists several chat models. Choose one:	Máy chủ này có nhiều mô hình trò chuyện. Hãy chọn một:
+Choose a model	Chọn mô hình

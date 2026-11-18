@@ -56,7 +56,7 @@ pub fn buttons(ui: &mut egui::Ui, chosen: &mut Option<DetectTab>, detected: &[De
     let labels = [format!("{} ({providers})", tr("Providers")), format!("{} ({harnesses})", tr("Harnesses")), tr("Custom endpoint")];
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     let at = tabs.iter().position(|t| *t == showing).unwrap_or_default();
-    if let Some(i) = crate::widgets::segmented(ui, &labels, at) {
+    if let Some(i) = crate::widgets::segmented(ui, &labels, at, crate::theme::ControlSize::Medium) {
         *chosen = tabs.get(i).copied();
     }
     showing

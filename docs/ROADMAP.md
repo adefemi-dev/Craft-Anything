@@ -2308,12 +2308,19 @@ Owner: open · Status: in progress
       before opening its subfolders, so when the file limit stopped it, a file inside an earlier
       folder (`a/first.txt`) was dropped while later root files (`z1.txt`…) were kept, and sorting
       couldn't bring it back (CodeRabbit on #2072). The walk now opens a folder where its name sorts
-      in its parent, so a limit cuts the tree where a listing of it would end, and results are sorted
-      folder by folder (`path_order`: everything in `a` before `a-b.txt`). Only the listings of the
-      folders on the current path are held, within the same entry limit. Where a folder's own
-      listing is cut by the entry or path-byte limit, the names kept are still the ones the system
-      returned first
+      in its parent, so a limit that stops the walk (files, entries, path bytes) cuts the tree where
+      a listing of it would end, and results are sorted folder by folder (`path_order`: everything in
+      `a` before `a-b.txt`). Only the listings of the folders on the current path are held, within
+      the same entry limit. Two limits leave a gap rather than an end: a folder past `max_depth` is
+      skipped (the walk is marked cut short) and later entries are still listed; and where a
+      folder's own listing is cut by the entry or path-byte limit, the names kept are the ones the
+      system returned first, which only NTFS returns in name order
       — claimed: hichang4u, branch bugfix/r3.11-walk-path-order
+- [ ] A walk names entries by `to_string_lossy`, so on Unix two folders whose raw names differ only
+      in bytes that aren't UTF-8 (`a\x80`, `a\x81`) both read as `a�`: they are walked as two
+      folders but sorted as one path, so a cut walk can keep a later file and drop an earlier one
+      (CodeRabbit on #2101). Order by the raw name, or report a name that can't be shown
+      unambiguously as unlisted
 
 ### R3.12 Format parser correctness
 Owner: open · Status: in progress

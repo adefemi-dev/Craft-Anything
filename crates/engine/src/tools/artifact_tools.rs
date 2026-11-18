@@ -418,7 +418,10 @@ fn walk_dir_reading<I: Iterator<Item = std::io::Result<std::ffi::OsString>>>(
             };
             let prefix_len = if rel.is_empty() { 0 } else { rel.len().saturating_add(1) };
             let listing = list_within(entries, prefix_len, entries_left, path_bytes_left, cancel)?;
-            entries_left = entries_left.saturating_sub(listing.examined);
+            // A cut listing read one entry more than it kept, to know the folder held more. The walk
+            // goes on into this folder's subfolders before it stops, so that read is charged too:
+            // otherwise each cut folder could read one more, past the walk's limit plus one.
+            entries_left = entries_left.saturating_sub(listing.examined.saturating_add(usize::from(listing.cut)));
             path_bytes_left = path_bytes_left.saturating_sub(listing.path_bytes);
             frames.push(Frame { dir, rel, depth, names: listing.names.into_iter(), unread: listing.unread, cut: listing.cut });
             continue;
@@ -1255,6 +1258,26 @@ mod tests {
     /// The walk used to list a folder's files before opening any of its subfolders, so when the
     /// file limit stopped it, a file inside an earlier folder was dropped for later ones, and the
     /// inventory's sort couldn't bring it back (CodeRabbit on #2072). It walks in path order now.
+    /// A listing cut by the path-byte limit read the name that didn't fit without charging it, and
+    /// the walk then opened the cut folder's subfolders with that entry still to spend, so the
+    /// whole walk could read past its entry limit plus one (CodeRabbit on #2101).
+    #[test]
+    fn a_name_over_the_path_byte_limit_is_charged_against_the_entry_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        for f in ["a/b", "a/c", "longname"] {
+            std::fs::write(dir.path().join(f), f).unwrap();
+        }
+        // The root keeps `a` (one byte), and `longname` doesn't fit the four bytes: two read, and
+        // nothing left of the two-entry limit to open `a` with.
+        let (w, read) = walk_ordered(dir.path(), 10, WalkLimits { max_entries: 2, max_path_bytes: 4 }, |_| {});
+        assert_eq!((w.dirs.as_slice(), w.truncated, read), (["a"].map(String::from).as_slice(), true, 2));
+        assert!(read <= 2 + 1, "the walk's entry limit and one more");
+        // With room for the folder, it is opened and listed as before.
+        let (w, read) = walk_ordered(dir.path(), 10, WalkLimits { max_entries: 10, max_path_bytes: 1 << 20 }, |_| {});
+        assert_eq!((rels(&w), w.truncated, read), (vec!["a/b", "a/c", "longname"], false, 4));
+    }
+
     #[test]
     fn a_cut_walk_is_a_prefix_of_the_tree_in_path_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -1541,6 +1564,24 @@ mod tests {
         (walked, read.get())
     }
 
+    /// [`walk`], with each folder listed in the order `order` gives its names (as a system might list
+    /// them; only NTFS lists by name), and the number of entries the walk took from the listings.
+    fn walk_ordered(root: &Path, max_files: usize, limits: WalkLimits, order: impl Fn(&mut Vec<std::ffi::OsString>)) -> (Walked, usize) {
+        let skip = |_: &str| false;
+        let opts = WalkOptions { max_files, max_depth: 64, skip_dir: &skip, gitignore: false, include_hidden: true };
+        let read = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let walked = walk_dir_reading(root, &opts, limits, &CancelToken::default(), |dir| {
+            let mut names: Vec<std::ffi::OsString> = names_in(dir).map(Result::unwrap).collect();
+            names.sort();
+            order(&mut names);
+            let read = read.clone();
+            let names: Names = Box::new(names.into_iter().map(Ok).inspect(move |_| read.set(read.get() + 1)));
+            Ok(names)
+        })
+        .unwrap();
+        (walked, read.get())
+    }
+
     /// [`walk`], and the number of entries it took from the system's folder listings.
     fn walk_counting(root: &Path, max_files: usize, limits: WalkLimits) -> (Walked, usize) {
         walk_adding(root, max_files, limits, |_| Box::new(std::iter::empty()))
@@ -1714,15 +1755,35 @@ mod tests {
                 std::fs::create_dir_all(dir.path().join(format!("d{d:02}/e{e}"))).unwrap();
             }
         }
-        // Ten of the root's thirty use the whole limit (eleven read), so d00 can't be opened: what
-        // it holds comes before d01 in path order, and the walk stops there.
-        let (w, read) = walk_counting(dir.path(), 1000, WalkLimits { max_entries: 10, max_path_bytes: 1 << 20 });
+        // A cut listing holds the entries the system returned first, so which folders are kept
+        // depends on its order; the walk is checked under two orders it may meet.
+        let in_name_order = |_: &mut Vec<std::ffi::OsString>| {};
+        let reversed = |names: &mut Vec<std::ffi::OsString>| names.reverse();
+        // Ten of the root's thirty use the whole limit (eleven read), so the first of them in name
+        // order can't be opened: what it holds comes before the rest, and the walk stops there.
+        let ten = WalkLimits { max_entries: 10, max_path_bytes: 1 << 20 };
+        let (w, read) = walk_ordered(dir.path(), 1000, ten, in_name_order);
         assert_eq!((w.dirs.as_slice(), w.truncated, read), (["d00"].map(String::from).as_slice(), true, 11));
         assert!(w.files.is_empty());
-        // 30 at the root, d00's three (each empty), then two of d01's and the one that says d01
-        // holds more: 36 read, and the walk ends at d01/e0, which there's nothing left to open with.
-        let (w, read) = walk_counting(dir.path(), 1000, WalkLimits { max_entries: 35, max_path_bytes: 1 << 20 });
+        let (w, read) = walk_ordered(dir.path(), 1000, ten, reversed);
+        assert_eq!((w.dirs.as_slice(), w.truncated, read), (["d20"].map(String::from).as_slice(), true, 11), "d29 to d20 were returned first");
+        // And from the system's own order, whatever it is: one of the thirty, at the root.
+        let (w, read) = walk_counting(dir.path(), 1000, ten);
+        assert!(w.dirs.len() == 1 && w.dirs[0].len() == 3 && w.dirs[0].starts_with('d'), "{:?}", w.dirs);
+        assert_eq!((w.truncated, read), (true, 11));
+        // 30 at the root (all of them, so in name order), d00's three (each empty), then two of
+        // d01's and the one that says d01 holds more: 36 read, and the walk ends at the first of
+        // d01's two, which there's nothing left to open with.
+        let thirty_five = WalkLimits { max_entries: 35, max_path_bytes: 1 << 20 };
+        let (w, read) = walk_ordered(dir.path(), 1000, thirty_five, in_name_order);
         assert_eq!(w.dirs, ["d00", "d00/e0", "d00/e1", "d00/e2", "d01", "d01/e0"]);
+        assert_eq!((w.truncated, read), (true, 36));
+        let (w, read) = walk_ordered(dir.path(), 1000, thirty_five, reversed);
+        assert_eq!(w.dirs, ["d00", "d00/e0", "d00/e1", "d00/e2", "d01", "d01/e1"], "d01 returned e2 and e1 first");
+        assert_eq!((w.truncated, read), (true, 36));
+        let (w, read) = walk_counting(dir.path(), 1000, thirty_five);
+        assert_eq!(w.dirs[..5], ["d00", "d00/e0", "d00/e1", "d00/e2", "d01"]);
+        assert!(w.dirs.len() == 6 && w.dirs[5].starts_with("d01/e"), "{:?}", w.dirs);
         assert_eq!((w.truncated, read), (true, 36));
         let (whole, read) = walk_counting(dir.path(), 1000, WalkLimits { max_entries: 121, max_path_bytes: 1 << 20 });
         assert_eq!((whole.dirs.len(), whole.truncated, read), (120, false, 120));

@@ -1,0 +1,258 @@
+//! Render the real Settings modal. Locale changes stay in one test (the catalog is global).
+//! Optional evidence: CRAFT_SETTINGS_SHOTS=target/settings-after cargo test -p
+//! craft-anything-ui-egui --test responsive_settings -- --nocapture
+
+use craft_anything_engine::Mode;
+use craft_anything_ui_egui::state::SettingsTab;
+use craft_anything_ui_egui::{CraftApp, demo, i18n, settings_ui, theme};
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+
+const TABS: [(SettingsTab, &str, &str); 7] = [
+    (SettingsTab::General, "General", "Mode"),
+    (SettingsTab::Engines, "Engines", "Clean room / Deep"),
+    (SettingsTab::Ai, "AI", "Claude"),
+    (SettingsTab::Builds, "Builds", "Good enough"),
+    (SettingsTab::Plugins, "Plugins", "No plugins yet."),
+    (SettingsTab::Safety, "Safety", "Ask before running anything"),
+    (SettingsTab::About, "About", "Craft Anything"),
+];
+
+fn harness(size: egui::Vec2, zoom: f32, lang: &str) -> Harness<'static, CraftApp> {
+    let mut app = demo::app(demo::engine(Mode::Beginner, true));
+    app.settings.language = lang.into();
+    app.settings.projects_dir = Some("/samples/projects with a deliberately long name for wrapping".into());
+    app.state.settings_open = true;
+    app.detected = Some(demo::detected());
+    i18n::set_language(lang);
+    let mut first = true;
+    let mut h = Harness::builder().with_size(size).with_max_steps(64).build_ui_state(
+        move |ui, app| {
+            if first {
+                CraftApp::setup_context(ui.ctx());
+                ui.ctx().set_zoom_factor(zoom);
+                first = false;
+                // Font definitions bind at the start of the next pass.
+                return;
+            }
+            theme::apply(ui.ctx(), app.theme_kind(), true);
+            settings_ui::show(app, ui.ctx());
+        },
+        app,
+    );
+    h.run_steps(4);
+    h
+}
+
+fn modal(h: &Harness<'_, CraftApp>) -> egui::Rect {
+    h.ctx.memory(|m| m.area_rect(egui::Id::new("settings-window"))).expect("Settings area")
+}
+
+fn screenshot(h: &mut Harness<'_, CraftApp>, name: &str) {
+    if let Some(dir) = std::env::var_os("CRAFT_SETTINGS_SHOTS") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = h.render().expect("render Settings");
+        image.save(dir.join(format!("{name}.png"))).unwrap();
+    }
+}
+
+#[test]
+fn settings_fits_and_remains_usable_in_each_viewport_and_language() {
+    let mut failures = Vec::new();
+    // The harness receives window points at native scale 1; egui's real zoom then halves
+    // the small viewport to 380×260 logical points. Rendered PNGs remain 760×520 pixels.
+    for lang in ["en", "tr", "de"] {
+        for (name, size, zoom) in
+            [("small-2x", egui::vec2(760.0, 520.0), 2.0), ("normal", egui::vec2(900.0, 600.0), 1.0), ("desktop", egui::vec2(1440.0, 900.0), 1.0)]
+        {
+            let mut h = harness(size, zoom, lang);
+            let viewport = h.ctx.content_rect();
+            assert_eq!(viewport.size(), size / zoom);
+            for (tab, label, content) in TABS {
+                // Select every page even on the broken layout, collecting all failures before
+                // failing. The interaction checks below exercise actual clicks and keyboard input.
+                h.state_mut().state.settings_tab = tab;
+                h.run_steps(4);
+                h.get_by_label(&i18n::tr(content));
+                let dialog = modal(&h);
+                if !viewport.expand(0.5).contains_rect(dialog) {
+                    failures.push(format!("{lang}/{name}/{label}: modal {dialog:?} exceeds {viewport:?}"));
+                }
+                let selected = h.get_by_label(&i18n::tr(label)).rect();
+                if !dialog.contains_rect(selected) {
+                    failures.push(format!("{lang}/{name}/{label}: selected tab {selected:?} is outside {dialog:?}"));
+                }
+                if name == "desktop" && (dialog.width() > 900.0 || dialog.height() > 700.0) {
+                    failures.push(format!("{lang}/{name}/{label}: desktop dialog lost its usual proportions: {dialog:?}"));
+                }
+                for key in ["Settings", "Close"] {
+                    // Turkish also calls an AI's Off action "Kapat"; the header comes first.
+                    let rect = h.get_all_by_label(&i18n::tr(key)).next().expect("header control").rect();
+                    if !viewport.contains_rect(rect) {
+                        failures.push(format!("{lang}/{name}/{label}: {key} {rect:?} is offscreen"));
+                    }
+                }
+                for role in [
+                    egui::accesskit::Role::Button,
+                    egui::accesskit::Role::CheckBox,
+                    egui::accesskit::Role::TextInput,
+                    egui::accesskit::Role::ComboBox,
+                    egui::accesskit::Role::SpinButton,
+                ] {
+                    for node in h.query_all_by_role(role) {
+                        let rect = node.rect();
+                        if TABS.iter().any(|(_, title, _)| h.query_all_by_label(&i18n::tr(title)).any(|tab| tab.rect() == rect)) {
+                            continue;
+                        }
+                        if rect.left() < dialog.left() - 0.5 || rect.right() > dialog.right() + 0.5 {
+                            failures.push(format!("{lang}/{name}/{label}: {role:?} {rect:?} exceeds dialog horizontally"));
+                        }
+                    }
+                }
+                // Controls and prose must fit horizontally even when their page needs vertical
+                // scrolling. Inspect the real painted text, including wrapped translated blurbs.
+                for shape in &h.output().shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        // Offscreen navigation labels are legitimate inside a scrolling rail.
+                        if TABS.iter().any(|(_, title, _)| i18n::tr(title) == text.galley.text()) {
+                            continue;
+                        }
+                        let rect = text.galley.rect.translate(text.pos.to_vec2());
+                        if rect.right() > dialog.right() + 0.5 || rect.left() < dialog.left() - 0.5 {
+                            failures.push(format!("{lang}/{name}/{label}: text {:?} exceeds dialog horizontally", text.galley.text()));
+                        }
+                    }
+                }
+                screenshot(&mut h, &format!("{lang}-{name}-{label}"));
+            }
+        }
+    }
+    i18n::set_language("en");
+    assert!(failures.is_empty(), "{} layout failures:\n{}", failures.len(), failures.join("\n"));
+    navigation_and_editing();
+    longer_content_and_resize();
+}
+
+fn longer_content_and_resize() {
+    let mut h = harness(egui::vec2(760.0, 520.0), 2.0, "en");
+    h.state_mut().settings.plugins = serde_json::from_value(serde_json::json!({
+        "mcp": [{"id": "docs", "name": "Documentation tools with a deliberately long display name", "command": "/samples/tools/documentation-helper-with-a-long-name"}],
+        "wasm": [{"id": "sample", "name": "Sample component with another long display name", "path": "/samples/plugins/a-long-component-name.wasm"}]
+    })).unwrap();
+    h.state_mut().state.settings_tab = SettingsTab::Plugins;
+    h.run_steps(4);
+    let initial = modal(&h);
+    assert!(h.ctx.content_rect().contains_rect(initial));
+    for label in ["Read its tools", "Plugin id", "Plugin command or address", "Plugin arguments"] {
+        h.get_by_label(label).scroll_to_me();
+        h.run_steps(4);
+        assert!(modal(&h).contains_rect(h.get_by_label(label).rect()), "{label} must be fully reachable");
+        assert_eq!(modal(&h), initial, "scrolling a populated plugin page must not resize Settings");
+    }
+    screenshot(&mut h, "en-small-2x-plugin-form");
+    let error = "A settings save failed. Please check the destination and try again. ".repeat(12);
+    h.state_mut().toast(error.clone(), true);
+    h.run_steps(4);
+    assert!(h.ctx.content_rect().contains_rect(modal(&h)));
+    assert!(modal(&h).contains_rect(h.get_by_label("Close").rect()), "a long error leaves Close in view");
+    assert!(h.get_by_label(&error).rect().top() < modal(&h).bottom(), "a new save error starts in view");
+    h.get_by_label("Dismiss").scroll_to_me();
+    h.run_steps(4);
+    assert!(modal(&h).contains_rect(h.get_by_label("Dismiss").rect()));
+    h.get_by_label("Dismiss").click();
+    h.run_steps(3);
+    assert!(h.state().state.toasts.is_empty());
+    // Resize the same open modal and exercise the vertical rail in a wide, short viewport.
+    h.ctx.set_zoom_factor(1.0);
+    h.run_steps(2);
+    // Let egui apply zoom before supplying the new logical screen rect: applying both in
+    // one frame makes egui's zoom adjustment replace the harness's explicit resize.
+    h.set_size(egui::vec2(900.0, 260.0));
+    h.run_steps(4);
+    assert_eq!(h.ctx.content_rect().size(), egui::vec2(900.0, 260.0));
+    h.get_by_label("About").scroll_to_me();
+    h.run_steps(4);
+    assert!(modal(&h).contains_rect(h.get_by_label("About").rect()));
+    h.get_by_label("About").click();
+    h.run_steps(3);
+    assert_eq!(h.state().state.settings_tab, SettingsTab::About);
+    assert!(h.ctx.content_rect().contains_rect(modal(&h)));
+    screenshot(&mut h, "en-wide-short-last-tab");
+    h.ctx.set_zoom_factor(2.0);
+    h.run_steps(2);
+    h.set_size(egui::vec2(380.0, 260.0));
+    h.run_steps(4);
+    assert_eq!(h.ctx.content_rect().size(), egui::vec2(380.0, 260.0));
+    assert!(h.ctx.content_rect().contains_rect(modal(&h)));
+    assert!(modal(&h).contains_rect(h.get_by_label("About").rect()), "selected tab stays in view after resizing");
+}
+
+fn navigation_and_editing() {
+    let mut h = harness(egui::vec2(760.0, 520.0), 2.0, "en");
+    let close = h.get_by_label("Close").rect();
+    // Scroll the rail to its last tab, then back through every tab by real pointer clicks.
+    h.get_by_label("About").scroll_to_me();
+    h.run_steps(4);
+    assert!(modal(&h).contains_rect(h.get_by_label("About").rect()));
+    h.get_by_label("About").click();
+    h.run_steps(3);
+    assert_eq!(h.state().state.settings_tab, SettingsTab::About);
+    for (tab, label, content) in TABS {
+        h.get_by_label(label).scroll_to_me();
+        h.run_steps(4);
+        h.get_by_label(label).click();
+        h.run_steps(3);
+        assert_eq!(h.state().state.settings_tab, tab);
+        h.get_by_label(content);
+        assert_eq!(h.get_by_label("Close").rect(), close, "header stays pinned on {label}");
+    }
+    // Tab reaches the next tab and brings it into view; Enter activates it.
+    h.get_by_label("General").focus();
+    h.run_steps(3);
+    h.key_press(egui::Key::Tab);
+    h.run_steps(3);
+    assert!(h.get_by_label("Engines").is_focused());
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(h.state().state.settings_tab, SettingsTab::Engines);
+    h.get_by_label("General").scroll_to_me();
+    h.run_steps(3);
+    h.get_by_label("General").click();
+    h.run_steps(3);
+    h.get_by_label("Reset").scroll_to_me();
+    h.run_steps(4);
+    assert!(modal(&h).contains_rect(h.get_by_label("Reset").rect()), "the last setting scrolls into view");
+    h.get_by_label("Studio Light").scroll_to_me();
+    h.run_steps(4);
+    assert!(modal(&h).contains_rect(h.get_by_label("Studio Light").rect()));
+    h.get_by_label("Studio Light").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings.theme, "studio-light");
+    // This focused modal harness doesn't run the app's debounce worker. Verify the changed
+    // value's persisted representation under a temporary path; exit_settings covers the worker.
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    h.state().settings.save_to(&config).unwrap();
+    assert_eq!(craft_anything_engine::Settings::load_from(&config).theme, "studio-light");
+    assert_eq!(h.get_by_label("Close").rect(), close, "content scrolling leaves Close in place");
+    screenshot(&mut h, "en-small-2x-scrolled-theme");
+    h.get_by_label("General").focus();
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    h.run_steps(3);
+    assert!(h.get_by_label("Close").is_focused(), "Shift+Tab from the first tab reaches Close");
+    h.key_press(egui::Key::Space);
+    h.run_steps(3);
+    assert!(!h.state().state.settings_open);
+    h.state_mut().state.settings_open = true;
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().state.settings_open);
+    h.state_mut().state.settings_open = true;
+    h.run_steps(3);
+    h.get_by_label("Close").click();
+    h.run_steps(3);
+    assert!(!h.state().state.settings_open);
+}

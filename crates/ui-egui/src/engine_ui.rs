@@ -445,13 +445,15 @@ impl CraftApp {
 fn key_field(app: &mut CraftApp, ui: &mut Ui, provider: &dyn AssetProvider, save: &str) -> Option<String> {
     let t = Tokens::get(ui.ctx());
     let mut out = None;
-    ui.horizontal(|ui| {
+    let width = (ui.available_width() - 18.0).clamp(0.0, 320.0);
+    let narrow = ui.available_width() < 400.0;
+    let add = |ui: &mut Ui| {
         let key = app.key_inputs.entry(provider.id().into()).or_default();
         let r = ui.add(
             egui::TextEdit::singleline(key)
                 .password(true)
                 .hint_text(trf("Paste your {name} key", &[("name", provider.name())]))
-                .desired_width(320.0)
+                .desired_width(width)
                 .frame(widgets::text_field_frame_compact(&t)),
         );
         widgets::named(r, &trf("{name} key", &[("name", provider.name())]));
@@ -460,7 +462,12 @@ fn key_field(app: &mut CraftApp, ui: &mut Ui, provider: &dyn AssetProvider, save
             key.clear();
             out = Some(k);
         }
-    });
+    };
+    if narrow {
+        ui.vertical(add);
+    } else {
+        ui.horizontal(add);
+    }
     out
 }
 

@@ -87,6 +87,11 @@ names (`git merge-base --is-ancestor <fix> <release tag>`), and check the messag
 
 ## Tests
 
+**A zoom-and-resize test kept the old viewport.** Applying egui zoom and a harness resize in
+the same frame let the zoom adjustment replace the supplied screen rectangle. Apply zoom first,
+then resize in logical points, and assert `ctx.content_rect()` matches the requested viewport
+before checking layout. A screenshot of the supposed wide, short window exposed this.
+
 **A TLS fixture closed before the handshake.** Accepted sockets inherited the listener's
 nonblocking mode on Windows, so the fixture read `WouldBlock` and closed a valid connection.
 Set the accepted socket to blocking mode before applying bounded I/O timeouts; consume the
@@ -576,6 +581,13 @@ anything. A test gated on `unix` must only need what every Unix build has; FreeB
 through pipes, as Windows does.
 
 ## Design
+
+**A bounded modal still grew with its children.** Settings' minimum width and page height ran
+outside a 380×260 logical viewport. Removing those minima alone still let AI fields and nested
+dropdowns widen it; a wrapping row does not always constrain a control that measures a child UI.
+Budget the frame and actual remaining height, scroll navigation independently, and stack control
+groups when narrow. Test the real modal bounds on every tab, then inspect rendered screenshots;
+also check normal desktop proportions, since a separator can fill an unconstrained body height.
 
 **A source inventory limit came after expansion.** Taking five thousand names after collecting
 every source path copied a large `sourceRoot` into every entry first. Count retained entries and

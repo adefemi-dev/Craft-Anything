@@ -288,6 +288,8 @@ struct HeldDialog {
     /// [`dialog_open`]: what it asks.
     open: Value,
     client: CdpClient,
+    /// The `accept` of an answer sent to it whose reply hadn't come ([`CdpClient::answer_unconfirmed`]).
+    sent: Option<bool>,
 }
 
 /// The question the open website's page is waiting on, if any.
@@ -297,7 +299,12 @@ fn held_dialog(site: &SiteBrowser) -> Option<Value> {
 
 /// Keep `client` until the question it saw is answered.
 fn hold(site: &SiteBrowser, open: Value, client: CdpClient) {
-    let old = site.held.lock().ok().and_then(|mut h| h.replace(HeldDialog { open, client }));
+    hold_answered(site, open, client, None);
+}
+
+/// [`hold`], noting the `accept` of an answer already sent to it and not confirmed yet.
+fn hold_answered(site: &SiteBrowser, open: Value, client: CdpClient, sent: Option<bool>) {
+    let old = site.held.lock().ok().and_then(|mut h| h.replace(HeldDialog { open, client, sent }));
     if let Some(old) = old {
         dismiss(old);
     }
@@ -737,7 +744,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     let dl = deadline(ctx, p.timeout_secs)?;
     let site = open_site(ctx, &dl)?;
     // Only the connection that saw the question can answer it (HeldDialog).
-    let Some(HeldDialog { open: asked, mut client }) = take_held(&site) else {
+    let Some(HeldDialog { open: asked, mut client, sent }) = take_held(&site) else {
         return Err(ToolError::new(ErrorCode::NotFound, "The page isn't waiting on a question, so there's nothing to answer.")
             .with_remediation("A question the website asks is reported as dialog_open by web_site_open or web_site_capture; answer it then."));
     };
@@ -745,8 +752,11 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     if let (Some(t), Some(o)) = (&p.prompt_text, answer.as_object_mut()) {
         o.insert("promptText".into(), json!(t));
     }
-    match client.answer_dialog(answer, &dl) {
-        Ok(DialogAnswer::Answered) => {}
+    // What the page took: this answer, or one sent before whose reply came late (then this one
+    // isn't sent, so it can't land on a question the page asked since).
+    let (taken, earlier) = match client.answer_dialog(answer, &dl) {
+        Ok(DialogAnswer::Answered) => (p.accept, false),
+        Ok(DialogAnswer::AnsweredBefore) => (sent.unwrap_or(p.accept), true),
         // The browser says so when nothing is showing any more (the page closed it itself).
         Ok(DialogAnswer::NotShowing(e)) => {
             cleanup(&mut client, &dl);
@@ -757,7 +767,8 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         // No word either way (out of time, stopped): the question may still be showing, and this
         // connection is the only one that can answer it, so it's kept for another try.
         Err(e) if client.connected() && client.waiting_dialog().is_some() => {
-            hold(&site, asked, client);
+            let sent = client.answer_unconfirmed().then(|| sent.unwrap_or(p.accept));
+            hold_answered(&site, asked, client, sent);
             return Err(ToolError::new(e.code, format!("The browser didn't confirm the answer to the page's question: {}", e.message)).with_remediation(
                 format!("The page is still waiting on it: call {DIALOG_ANSWER_TOOL} again, with a longer timeout_secs if the browser is slow."),
             ));
@@ -767,7 +778,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
             return Err(ToolError::new(e.code, format!("The connection to the page was lost while answering its question: {}", e.message))
                 .with_remediation("Open the website again with web_site_open to see where it is."));
         }
-    }
+    };
     let asked = Some(asked);
     let r = (|| -> Result<(Value, Value), ToolError> {
         client.call("Page.enable", json!({}), None, &dl)?;
@@ -780,9 +791,13 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         let facts = if health.get("dialog_open").is_none() { page_facts(&mut client, &dl)? } else { Value::Null };
         Ok((health, facts))
     })();
-    // A question asked while we set up is held by the client: the page stopped there.
+    // A question asked while we set up is held by the client: the page stopped there. Its opening
+    // is still queued; read it now, or the next answer would take it for something said after.
     let r = match r {
-        Err(_) if client.waiting_dialog().is_some() => Ok((health_with_dialog(&client, &[]), Value::Null)),
+        Err(_) if client.waiting_dialog().is_some() => {
+            let queued = client.take_events();
+            Ok((health_with_dialog(&client, &queued), Value::Null))
+        }
         r => r,
     };
     let next = client.waiting_dialog().map(dialog_open);
@@ -793,7 +808,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     // A later capture records the page's health: it gets the answer and what the page did after.
     let after = r.as_ref().map(|(h, _)| h.clone()).unwrap_or(Value::Null);
     if let Ok(mut h) = site.health.lock() {
-        let merged = health_after_answer(&h, p.accept, &after);
+        let merged = health_after_answer(&h, taken, &after);
         *h = merged;
     }
     let (health, facts) = r?;
@@ -807,8 +822,12 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
         || "the page's question".to_string(),
         |a| format!("the page's {} (\"{}\")", if a["type"] == "prompt" { "prompt" } else { "confirm question" }, a["message"].as_str().unwrap_or_default()),
     );
-    let verb = if p.accept { "Accepted" } else { "Dismissed" };
-    let typed = if p.prompt_text.is_some() { " with the text given" } else { "" };
+    let verb = if taken { "Accepted" } else { "Dismissed" };
+    let typed = match (earlier, p.prompt_text.is_some()) {
+        (true, _) => " with the answer sent before, which the browser took late (this one wasn't sent)",
+        (false, true) => " with the text given",
+        (false, false) => "",
+    };
     let now = if next.is_some() {
         String::new()
     } else if title.is_empty() {
@@ -825,7 +844,7 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
             // What was typed into a prompt is the agent's answer, not the site's: only that one was given.
             .params(json!({"accept": p.accept, "prompt_text_given": p.prompt_text.is_some()}))
             .result(json!({
-                "answered": {"dialog": asked, "accept": p.accept},
+                "answered": {"dialog": asked, "accept": taken, "earlier": earlier},
                 "url": here.map(|u| shown_url(&u)),
                 "title": title,
                 "dialogs": dialogs,
@@ -1977,53 +1996,219 @@ mod tests {
         assert_eq!(health_after_answer(&Value::Null, true, &after)["errors"].as_array().map(Vec::len), Some(2), "nothing stored before");
     }
 
-    /// A page connection to a stand-in browser that sends `script`'s messages; no browser starts.
-    fn stand_in_page(script: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> CdpClient {
+    /// A page connection to a stand-in browser that runs `script` on its WebSocket and answers
+    /// `/json/version` (so the open website counts as live); no browser starts.
+    fn stand_in_page(script: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> (CdpClient, Endpoint) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
+        let mut script = Some(script);
         std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut head = Vec::new();
-            let mut b = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap_or(0) == 1 {
-                head.push(b[0]);
+            for mut s in listener.incoming().flatten() {
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let text = String::from_utf8_lossy(&head).into_owned();
+                let Some(key) = text.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")).map(|k| k.trim().to_string()) else {
+                    let body = json!({"Browser": "Stand-in/1", "Protocol-Version": "1.3"}).to_string();
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    continue;
+                };
+                let accept = {
+                    use base64::Engine as _;
+                    use sha1::{Digest, Sha1};
+                    let mut h = Sha1::new();
+                    h.update(key.as_bytes());
+                    h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                    base64::engine::general_purpose::STANDARD.encode(h.finalize())
+                };
+                let reply = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n");
+                s.write_all(reply.as_bytes()).unwrap();
+                s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                if let Some(script) = script.take() {
+                    std::thread::spawn(move || {
+                        script(&mut s);
+                        // Stay connected until the client is done.
+                        let _ = s.read(&mut [0u8; 1]);
+                    });
+                }
             }
-            let text = String::from_utf8_lossy(&head).into_owned();
-            let key = text.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")).unwrap_or_default().trim().to_string();
-            let accept = {
-                use base64::Engine as _;
-                use sha1::{Digest, Sha1};
-                let mut h = Sha1::new();
-                h.update(key.as_bytes());
-                h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-                base64::engine::general_purpose::STANDARD.encode(h.finalize())
-            };
-            let reply = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n");
-            s.write_all(reply.as_bytes()).unwrap();
-            script(&mut s);
-            // Stay connected until the client is done.
-            let _ = s.read(&mut [0u8; 1]);
         });
         let ep = cdp::parse_endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
         let target = cdp::ws_target(&format!("ws://127.0.0.1:{port}/devtools/page/P"), &ep).unwrap();
         let dl = Deadline::new(Duration::from_secs(5), crate::tool::CancelToken::default());
-        CdpClient::new(cdp::WsConn::connect(&target, 1 << 20, &dl).unwrap()).answering_notices()
+        (CdpClient::new(cdp::WsConn::connect(&target, 1 << 20, &dl).unwrap()).answering_notices(), ep)
     }
 
     /// Send one unmasked text frame, as a browser does.
     fn send_frame(s: &mut std::net::TcpStream, v: Value) {
         use std::io::Write;
         let body = v.to_string().into_bytes();
-        let mut frame = vec![0x81u8, u8::try_from(body.len()).unwrap()];
+        let mut frame = vec![0x81u8];
+        match u8::try_from(body.len()) {
+            Ok(n) if n < 126 => frame.push(n),
+            _ => {
+                frame.push(126);
+                frame.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
+            }
+        }
         frame.extend_from_slice(&body);
         s.write_all(&frame).unwrap();
+    }
+
+    /// Read one masked client frame's JSON; `None` once the client closes.
+    fn read_frame(s: &mut std::net::TcpStream) -> Option<Value> {
+        use std::io::Read;
+        let mut hdr = [0u8; 2];
+        s.read_exact(&mut hdr).ok()?;
+        let mut len = usize::from(hdr[1] & 0x7f);
+        if len == 126 {
+            let mut e = [0u8; 2];
+            s.read_exact(&mut e).ok()?;
+            len = usize::from(u16::from_be_bytes(e));
+        }
+        let mut mask = [0u8; 4];
+        s.read_exact(&mut mask).ok()?;
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body).ok()?;
+        for (i, b) in body.iter_mut().enumerate() {
+            *b ^= mask[i % 4];
+        }
+        if hdr[0] & 0x0f == 0x8 {
+            return None;
+        }
+        serde_json::from_slice(&body).ok()
+    }
+
+    /// Reply to the client's commands as a page would (its facts for an evaluate, `{}` otherwise)
+    /// until one `hand_back` picks, which is returned unanswered; `None` once the client closes.
+    fn reply_until(s: &mut std::net::TcpStream, hand_back: impl Fn(&Value) -> bool) -> Option<Value> {
+        loop {
+            let m = read_frame(s)?;
+            if hand_back(&m) {
+                return Some(m);
+            }
+            let result = if m["method"] == "Runtime.evaluate" {
+                json!({"result": {"type": "object", "value": {"url": "http://page.test/done", "title": "Done", "ready": "complete"}}})
+            } else {
+                json!({})
+            };
+            send_frame(s, json!({"id": m["id"], "result": result}));
+        }
+    }
+
+    /// An engine whose open website is the stand-in page `client` reaches, waiting on the
+    /// question it has already sent.
+    fn engine_held(mut client: CdpClient, ep: &Endpoint) -> crate::Engine {
+        client.pump_until(&Deadline::new(Duration::from_millis(500), crate::tool::CancelToken::default())).unwrap();
+        let events = client.take_events();
+        let open = dialog_open(client.waiting_dialog().expect("the stand-in asked a question"));
+        let mut health = page_health(&events, true);
+        health["dialog_open"] = open.clone();
+        let site = SiteBrowser {
+            endpoint: ep.clone(),
+            product: "Stand-in/1".into(),
+            version: "1.3".into(),
+            url: Mutex::new("http://page.test/".into()),
+            health: Mutex::new(health),
+            held: Mutex::new(Some(HeldDialog { open, client, sent: None })),
+            signed_in: None,
+            sign_in_revision: None,
+            _owner: Mutex::new(Browser::attached(ep, "Stand-in/1", "1.3")),
+        };
+        let mut s = crate::testing::session();
+        // The tool asks for a browser before it runs; this stand-in file is never started.
+        s.settings.engines.tools.chromium = Some(std::env::current_exe().unwrap());
+        s.ext.insert(Arc::new(site));
+        crate::Engine::new(s)
+    }
+
+    fn answer(e: &crate::Engine, params: Value) -> Result<Value, ToolError> {
+        let opts = crate::CallOptions::new(crate::Caller::Mcp).with_consent(crate::Consent::Granted);
+        e.call(DIALOG_ANSWER_TOOL, params, opts).map(|o| o.to_json())
+    }
+
+    fn stored_health(e: &crate::Engine) -> Value {
+        let site = e.session().ext.get::<SiteBrowser>().unwrap();
+        site.health.lock().unwrap().clone()
+    }
+
+    /// #2019 review: a question the page asks before an answer's reply is recorded once, as the
+    /// one waiting, and once answered the stored health says so instead of listing it again as
+    /// something the page did after the answer.
+    #[test]
+    fn a_second_question_is_recorded_once_and_answered() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            // The first answer: the page asks next before its reply.
+            let first = read_frame(s).unwrap();
+            assert_eq!(first["method"], "Page.handleJavaScriptDialog");
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": "Sales"}}));
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            // The second answer, then the page goes on.
+            let second = reply_until(s, |m| m["method"] == "Page.handleJavaScriptDialog").unwrap();
+            assert_eq!(second["params"], json!({"accept": true, "promptText": "Design"}));
+            send_frame(s, json!({"id": second["id"], "result": {}}));
+            send_frame(s, json!({"method": cdp::DIALOG_CLOSED, "params": {"result": true}}));
+            reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        let asked = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(asked["result"]["dialog_open"]["type"], "prompt", "{asked}");
+        let h = stored_health(&e);
+        assert_eq!(
+            h["dialogs"],
+            json!([{"type": "confirm", "message": "Continue?", "answered": "accepted"}, {"type": "prompt", "message": "Your team?", "answered": "waiting"}]),
+            "{h}"
+        );
+        let done = answer(&e, json!({"accept": true, "prompt_text": "Design", "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["title"], "Done", "{done}");
+        let h = stored_health(&e);
+        assert_eq!(
+            h["dialogs"],
+            json!([{"type": "confirm", "message": "Continue?", "answered": "accepted"}, {"type": "prompt", "message": "Your team?", "answered": "accepted"}]),
+            "{h}"
+        );
+        assert!(h.get("dialog_open").is_none(), "{h}");
+    }
+
+    /// #2019 review: an answer that runs out of time keeps the question for another try, and the
+    /// try reads what that answer did instead of sending one that would land on the next question.
+    #[test]
+    fn an_answer_out_of_time_is_kept_and_its_late_outcome_used() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            assert_eq!(first["params"], json!({"accept": true}));
+            // Taken after its call ran out of time, and the page asks next.
+            std::thread::sleep(Duration::from_millis(1500));
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": ""}}));
+            // Nothing more is answered: the retry sent no answer of its own.
+            let next = reply_until(s, |m| m["method"] == "Page.handleJavaScriptDialog");
+            assert!(next.is_none(), "a second answer reached the page: {next:?}");
+        });
+        let e = engine_held(client, &ep);
+        let late = answer(&e, json!({"accept": true, "timeout_secs": 1})).unwrap_err();
+        assert_eq!(late.code, ErrorCode::TimedOut, "{late:?}");
+        assert!(late.remediation.as_deref().is_some_and(|r| r.contains(DIALOG_ANSWER_TOOL)), "{late:?}");
+        let retry = answer(&e, json!({"accept": false, "settle_ms": 100})).unwrap();
+        assert_eq!(retry["result"]["answered"]["accept"], true, "the answer the page took: {retry}");
+        assert_eq!(retry["result"]["answered"]["earlier"], true);
+        assert_eq!(retry["result"]["dialog_open"]["type"], "prompt", "{retry}");
+        assert!(retry["summary"].as_str().unwrap().contains("this one wasn't sent"), "{}", retry["summary"]);
+        let h = stored_health(&e);
+        assert_eq!(h["dialogs"][0]["answered"], "accepted", "{h}");
+        // Leaving the page dismisses the held prompt and closes the connection.
+        drop(e);
     }
 
     /// A question asked while the page settles ends the wait then, not at the end of the settle time.
     #[test]
     fn a_question_while_the_page_settles_ends_the_wait() {
-        let mut client = stand_in_page(|s| {
+        let (mut client, _) = stand_in_page(|s| {
             send_frame(s, json!({"method": "Page.loadEventFired", "params": {}}));
             std::thread::sleep(Duration::from_millis(300));
             send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Leave a review?"}}));

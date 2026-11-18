@@ -878,39 +878,25 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     Ok(ToolOutput::evidence(ev.build()?))
 }
 
-/// Most frames tracked as loading after an answer; the wait is bounded by time as well.
-const MAX_LOADING_FRAMES: usize = 256;
-
 /// After an answer the page may go on loading (a navigation it asked about) or stay where it is:
 /// wait for a load that started, at most 45 s, and at least `settle_ms`.
 fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
     let quiet = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
     let longest = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
-    // The frames still loading, by id: one frame (an iframe) stopping doesn't end another's load,
-    // and the page's load event ends them all. Bounded, as a page can start any number of frames.
-    let mut loading: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Frame loads are tracked by the client as its events arrive (CdpClient::frames_loading), so
+    // a load that started before the answer, or before an earlier question, is still waited for.
     // The events that came while the answer and setup awaited their replies are read first, so
     // no settle time (settle_ms: 0) skips only the extra wait, not what was already seen.
     let mut queued = client.take_events();
     loop {
         for e in queued {
-            match e.method.as_str() {
-                "Page.frameStartedLoading" if loading.len() < MAX_LOADING_FRAMES => {
-                    loading.insert(e.params["frameId"].as_str().unwrap_or_default().to_string());
-                }
-                "Page.frameStoppedLoading" => {
-                    loading.remove(e.params["frameId"].as_str().unwrap_or_default());
-                }
-                "Page.loadEventFired" => loading.clear(),
-                _ => {}
-            }
             let wanted =
                 e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING;
             if wanted && seen.len() < MAX_HEALTH_EVENTS {
                 seen.push(e);
             }
         }
-        if client.waiting_dialog().is_some() || longest.expired() || dl.expired() || (loading.is_empty() && quiet.expired()) {
+        if client.waiting_dialog().is_some() || longest.expired() || dl.expired() || (!client.frames_loading() && quiet.expired()) {
             return Ok(());
         }
         client.pump_until(&Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default()))?;
@@ -2354,51 +2340,100 @@ mod tests {
         assert_eq!(h["dialogs"], json!([{"type": "confirm", "message": "Continue?", "answered": "accepted"}]), "{h}");
     }
 
-    /// #2019 review: a load that started before the answer is waited for, so the page's facts
-    /// aren't read mid-load.
-    #[test]
-    fn a_load_under_way_before_the_answer_is_waited_for() {
+    /// A stand-in page that asks `questions` in turn: each answer is replied to, then
+    /// `after_answer[i]` is sent at once and `later[i]` (delay in ms, event) on a timer. The page's
+    /// facts say "Done" once the last timed event of that answer was sent, "Loading" before.
+    fn loading_page(questions: Vec<Value>, before: Vec<Value>, after_answer: Vec<Vec<Value>>, later: Vec<Vec<(u64, Value)>>) -> (CdpClient, Endpoint) {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let (client, ep) = stand_in_page(|s| {
+        stand_in_page(move |s| {
             let w = Arc::new(Mutex::new(s.try_clone().unwrap()));
             let say = |v: Value| {
                 if let Ok(mut out) = w.lock() {
                     send_frame(&mut out, v);
                 }
             };
-            say(json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Leave for the next step?"}}));
-            say(json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
-            say(json!({"method": "Page.frameStartedLoading", "params": {"frameId": "G"}}));
-            let first = read_frame(s).unwrap();
-            say(json!({"id": first["id"], "result": {}}));
-            // The load ends 800 ms later; facts read before then would be the half-loaded page.
-            let loaded = Arc::new(AtomicBool::new(false));
-            let (w2, loaded2) = (w.clone(), loaded.clone());
-            std::thread::spawn(move || {
-                // A child frame finishes first; the main frame is still loading.
-                std::thread::sleep(Duration::from_millis(300));
-                if let Ok(mut out) = w2.lock() {
-                    send_frame(&mut out, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "G"}}));
-                }
-                std::thread::sleep(Duration::from_millis(500));
-                if let Ok(mut out) = w2.lock() {
-                    loaded2.store(true, Ordering::SeqCst);
-                    send_frame(&mut out, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "F"}}));
-                }
-            });
+            say(json!({"method": cdp::DIALOG_OPENING, "params": questions[0]}));
+            before.into_iter().for_each(&say);
+            let loaded = Arc::new(AtomicBool::new(true));
+            let mut turn = 0;
             while let Some(m) = read_frame(s) {
-                let result = if m["method"] == "Runtime.evaluate" {
-                    let title = if loaded.load(Ordering::SeqCst) { "Done" } else { "Loading" };
-                    json!({"result": {"type": "object", "value": {"url": "http://page.test/next", "title": title}}})
-                } else {
-                    json!({})
+                let result = match m["method"].as_str() {
+                    Some("Runtime.evaluate") => {
+                        let title = if loaded.load(Ordering::SeqCst) { "Done" } else { "Loading" };
+                        json!({"result": {"type": "object", "value": {"url": "http://page.test/next", "title": title}}})
+                    }
+                    _ => json!({}),
                 };
                 say(json!({"id": m["id"], "result": result}));
+                if m["method"] != "Page.handleJavaScriptDialog" {
+                    continue;
+                }
+                after_answer.get(turn).cloned().unwrap_or_default().into_iter().for_each(&say);
+                let timed = later.get(turn).cloned().unwrap_or_default();
+                if !timed.is_empty() {
+                    loaded.store(false, Ordering::SeqCst);
+                    let (w2, loaded2) = (w.clone(), loaded.clone());
+                    std::thread::spawn(move || {
+                        for (ms, v) in timed {
+                            std::thread::sleep(Duration::from_millis(ms));
+                            if let Ok(mut out) = w2.lock() {
+                                send_frame(&mut out, v);
+                            }
+                        }
+                        loaded2.store(true, Ordering::SeqCst);
+                    });
+                }
+                turn += 1;
+                if let Some(q) = questions.get(turn) {
+                    say(json!({"method": cdp::DIALOG_OPENING, "params": q}));
+                }
             }
-        });
-        let e = engine_held_as(client, &ep, false);
+        })
+    }
+
+    fn frame(method: &str, id: &str) -> Value {
+        json!({"method": method, "params": {"frameId": id}})
+    }
+
+    /// #2019 review: a load that started before the answer is waited for until each of its frames
+    /// stops, so the page's facts aren't read mid-load: a child frame stopping first doesn't end
+    /// the main frame's load, and the root's load event doesn't end a child's.
+    #[test]
+    fn a_load_under_way_before_the_answer_is_waited_for() {
+        let confirm = json!({"type": "confirm", "message": "Leave for the next step?"});
+        let started = vec![frame("Page.frameStartedLoading", "F"), frame("Page.frameStartedLoading", "G")];
+        let orders = [
+            vec![(300, frame("Page.frameStoppedLoading", "G")), (500, frame("Page.frameStoppedLoading", "F"))],
+            vec![
+                (300, frame("Page.frameStoppedLoading", "F")),
+                (0, json!({"method": "Page.loadEventFired", "params": {}})),
+                (500, frame("Page.frameStoppedLoading", "G")),
+            ],
+        ];
+        for order in orders {
+            let (client, ep) = loading_page(vec![confirm.clone()], started.clone(), vec![], vec![order.clone()]);
+            let e = engine_held_as(client, &ep, false);
+            let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+            assert_eq!(done["result"]["title"], "Done", "read after the last frame stopped ({order:?}): {done}");
+        }
+    }
+
+    /// #2019 review: a frame that started loading after one answer, and was still loading when
+    /// the page asked again, is still waited for after the next answer.
+    #[test]
+    fn a_load_is_waited_for_across_questions() {
+        let questions = vec![json!({"type": "confirm", "message": "Continue?"}), json!({"type": "confirm", "message": "Are you sure?"})];
+        let (client, ep) = loading_page(
+            questions,
+            vec![],
+            vec![vec![frame("Page.frameStartedLoading", "F")]],
+            vec![vec![], vec![(800, frame("Page.frameStoppedLoading", "F"))]],
+        );
+        let e = engine_held(client, &ep);
+        let asked = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(asked["result"]["dialog_open"]["message"], "Are you sure?", "{asked}");
         let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
-        assert_eq!(done["result"]["title"], "Done", "read after the load ended: {done}");
+        assert_eq!(done["result"]["title"], "Done", "F's load from before the second question was waited for: {done}");
     }
 
     /// #2019 review: an answer that runs out of time keeps the question for another try, and the

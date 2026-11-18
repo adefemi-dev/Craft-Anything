@@ -591,7 +591,13 @@ pub struct CdpClient {
     questions: u64,
     /// An answer that was sent but whose reply hadn't come when its call ended ([`Unsettled`]).
     unsettled: Option<Unsettled>,
+    /// The frames that started loading and haven't stopped (or gone), by id, as events arrive:
+    /// kept with the connection, so a wait can resume after a question. Bounded ([`MAX_LOADING_FRAMES`]).
+    loading_frames: std::collections::HashSet<String>,
 }
+
+/// Most frames a client tracks as loading; a page can start any number of them.
+const MAX_LOADING_FRAMES: usize = 256;
 
 /// An answer sent without a word back yet. The browser applies an answer to whatever dialog is
 /// showing, with no id for it, so another answer isn't sent until this one's outcome is read: it
@@ -675,6 +681,7 @@ impl CdpClient {
             waiting: None,
             questions: 0,
             unsettled: None,
+            loading_frames: std::collections::HashSet::new(),
         }
     }
 
@@ -716,6 +723,11 @@ impl CdpClient {
     /// dismissed is answered too, rather than left with nothing to answer it.
     pub fn dismiss_from_now(&mut self) {
         self.dialogs = Dialogs::All;
+    }
+
+    /// Whether a frame of the page is still loading, from the frame events seen so far.
+    pub fn frames_loading(&self) -> bool {
+        !self.loading_frames.is_empty()
     }
 
     /// Drop the queued openings of questions (`confirm`, `prompt`), keeping every other event in
@@ -814,6 +826,14 @@ impl CdpClient {
     fn on_event(&mut self, v: Value) {
         match v.get("method").and_then(Value::as_str) {
             Some(DIALOG_CLOSED) => self.waiting = None,
+            // Each frame's own stop (or its removal) ends its load: the root document's load event
+            // doesn't, since an iframe can still be loading then.
+            Some("Page.frameStartedLoading") if self.loading_frames.len() < MAX_LOADING_FRAMES => {
+                self.loading_frames.insert(v["params"]["frameId"].as_str().unwrap_or_default().to_string());
+            }
+            Some("Page.frameStoppedLoading" | "Page.frameDetached") => {
+                self.loading_frames.remove(v["params"]["frameId"].as_str().unwrap_or_default());
+            }
             Some(DIALOG_OPENING) if self.dialogs == Dialogs::Notices && !is_notice(&v["params"]) => {
                 self.waiting = Some(v["params"].clone());
                 self.questions = self.questions.wrapping_add(1);

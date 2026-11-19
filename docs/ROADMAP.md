@@ -1634,12 +1634,9 @@ Gaps found while using the app for real projects.
       as unknown too: every production
       `Project::create` passes `Purpose::default()` ("It's mine, or I'm allowed to look"), and the
       first-run answer stays a UI preference (`Prefs`) that skipped setup leaves at that default.
-      Show it on the approval card for publishing. Put it in the build's README, as Deep-mode game
-      builds that use the original's files carry `app/CREDITS.md` and a private-use line, only
-      when the person chooses to: the first-run screen says the answer stays on this computer. It
-      is the person's word, not proof
-- [ ] **decision** What a project's stated purpose changes, if anything (publishing, credits).
-      Agents that don't ask our approval tool can skip the card (the approval-tool line above)
+      Show it on the approval card for publishing. It is the person's word, not proof
+- [ ] A stated purpose changes nothing except what is displayed: nobody can verify it, so no
+      behaviour depends on it
 - [ ] While "commands" are allowed (Auto mode's default), a builder can run any program. Commands
       that name `craft.json`, the inbox or the approvals tool count as system changes, and our CLI
       started inside an agent calls tools as an agent, but a script that builds the path, or

@@ -119,10 +119,9 @@ pub fn is_rtl_code(code: &str) -> bool {
     let tag = code.trim().split(['.', '@']).next().unwrap_or_default().replace('_', "-").to_ascii_lowercase();
     let mut parts = tag.split('-');
     let base = parts.next().unwrap_or("");
-    for subtag in parts {
-        if subtag.len() == 4 && subtag.bytes().all(|b| b.is_ascii_alphabetic()) {
-            return matches!(subtag, "arab" | "hebr" | "nkoo" | "rohg" | "syrc" | "thaa" | "yezi");
-        }
+    let next = parts.find(|p| !(p.len() == 3 && p.bytes().all(|b| b.is_ascii_alphabetic())));
+    if let Some(script) = next.filter(|p| p.len() == 4 && p.bytes().all(|b| b.is_ascii_alphabetic())) {
+        return matches!(script, "arab" | "hebr" | "nkoo" | "rohg" | "syrc" | "thaa" | "yezi");
     }
     matches!(base, "ar" | "ckb" | "dv" | "fa" | "he" | "iw" | "ps" | "sd" | "ug" | "ur" | "yi")
 }
@@ -197,11 +196,13 @@ mod tests {
         assert!(is_rtl_code("iw"));
         assert!(is_rtl_code("iw-IL"));
         assert!(is_rtl_code("he-Hebr-IL"));
+        assert!(is_rtl_code("he-u-nu-latn"));
         assert!(is_rtl_code("ckb"));
         assert!(is_rtl_code("ku-Arab-IQ"));
         assert!(!is_rtl_code("ku"));
         assert!(!is_rtl_code("ku-Latn-TR"));
         assert!(!is_rtl_code("sd-Deva-IN"));
+        assert!(!is_rtl_code("en-x-hebr"));
         assert!(!is_rtl_code("en"));
         assert_eq!(preferred_language(["de-DE", "zh-HK"]), "de");
         assert_eq!(preferred_language(["sv-SE", "vi-VN", "en-US"]), "vi");

@@ -1341,6 +1341,9 @@ includes its frame in its desired width.
 **Responsive parents changed transient Settings identities.** A `make_persistent_id` is still
 relative to its UI: moving a page between a column and a row lost a backend draft and its pending
 job marker. Namespace backend drafts and job ids independently of layout and error-scroll ids.
+Keeping draft text is not enough: give the page a stable UI identity, and give interactions
+explicit ids where cursor/focus must survive parent or scroll-id changes. Continue typing without
+refocusing and activate every tab after crossing the orientation breakpoint in both directions.
 On resize, consider keyboard focus separately from selection; egui keeps only the last scroll
 request, so combine the two rectangles when both fit and keep focus visible otherwise. Verify
 both tab orders and that ordinary frames still allow manual scrolling.

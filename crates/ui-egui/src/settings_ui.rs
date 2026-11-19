@@ -90,11 +90,13 @@ fn tabs(app: &mut CraftApp, ui: &mut Ui, horizontal: bool, height: f32) {
         if !horizontal && tab == SettingsTab::About {
             ui.add_space((height - ui.min_rect().height() - ui.spacing().item_spacing.y - TAB_H).max(theme::space::SM));
         }
+        let id = egui::Id::new(("settings-tab", title));
         let title = tr(title);
         let galley = ui.painter().layout_no_wrap(title.clone(), theme::medium(theme::BODY), if app.state.settings_tab == tab { t.text } else { t.text_dim });
         let w = if horizontal { galley.size().x + theme::icon::MD + 3.0 * theme::space::MD } else { ui.available_width() };
         let on = app.state.settings_tab == tab;
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(w, TAB_H), egui::Sense::click());
+        let (_, rect) = ui.allocate_space(Vec2::new(w, TAB_H));
+        let r = ui.interact(rect, id, egui::Sense::click());
         r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, &title));
         if on {
             ui.painter().rect_filled(rect, t.radius, t.accent_soft);
@@ -144,6 +146,11 @@ fn tabs(app: &mut CraftApp, ui: &mut Ui, horizontal: bool, height: f32) {
 }
 
 fn page(app: &mut CraftApp, ui: &mut Ui, h: f32) {
+    // The page moves between responsive parents; its widgets keep the same UI identity.
+    ui.scope_builder(egui::UiBuilder::new().id(egui::Id::new("settings-page-layout")), |ui| page_content(app, ui, h));
+}
+
+fn page_content(app: &mut CraftApp, ui: &mut Ui, h: f32) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
     ui.set_width(w);
@@ -744,7 +751,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                 ui.add_enabled_ui(!pending, |ui| {
                     controls(ui, |ui| {
                         let label = ui.label(tr("Requests per minute"));
-                        ui.add(egui::TextEdit::singleline(&mut text).hint_text("0").desired_width(90.0))
+                        ui.add(egui::TextEdit::singleline(&mut text).id(id.with("input")).hint_text("0").desired_width(90.0))
                             .labelled_by(label.id)
                             .on_hover_text(tr("Set to 0 for no limit."));
                         let rate = if text.trim().is_empty() { Some(0) } else { text.trim().parse::<u32>().ok() };

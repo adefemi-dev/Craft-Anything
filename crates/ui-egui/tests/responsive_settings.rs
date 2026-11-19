@@ -60,6 +60,7 @@ fn screenshot(h: &mut Harness<'_, CraftApp>, name: &str) {
 #[test]
 fn settings_fits_and_remains_usable_in_each_viewport_and_language() {
     let mut failures = Vec::new();
+    widget_focus_survives_orientation_changes(&mut failures);
     drafts_survive_resizing(&mut failures);
     focused_tabs_survive_resizing(&mut failures);
     server_model_choices_fit(&mut failures);
@@ -138,6 +139,64 @@ fn settings_fits_and_remains_usable_in_each_viewport_and_language() {
     assert!(failures.is_empty(), "{} layout failures:\n{}", failures.len(), failures.join("\n"));
     navigation_and_editing();
     longer_content_and_resize();
+}
+
+fn widget_focus_survives_orientation_changes(failures: &mut Vec<String>) {
+    let wide = theme::breakpoint::SETTINGS_RAIL + 2.0 * theme::space::XXL + 1.0;
+    let narrow = wide - 2.0;
+    let mut h = harness(egui::vec2(wide, 600.0), 1.0, "en");
+    h.state_mut().state.settings_tab = SettingsTab::Ai;
+    h.run_steps(4);
+    h.get_by_label("Requests per minute").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Requests per minute").focus();
+    h.run_steps(2);
+    h.get_by_label("Requests per minute").type_text("137");
+    h.run_steps(2);
+    h.key_press(egui::Key::Home);
+    h.run_steps(2);
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    for (width, typed, expected) in [(narrow, "4", "1437"), (wide, "2", "14237")] {
+        h.set_size(egui::vec2(width, 600.0));
+        h.run_steps(4);
+        if !h.get_by_label("Requests per minute").is_focused() {
+            failures.push(format!("review/input-focus/{width}: request-rate input lost focus"));
+        }
+        // type_text sends input only; it does not focus the widget.
+        h.get_by_label("Requests per minute").type_text(typed);
+        h.run_steps(3);
+        if h.get_by_label("Requests per minute").value().as_deref() != Some(expected) {
+            failures.push(format!("review/input-cursor/{width}: typing did not continue at the retained cursor"));
+        }
+    }
+    screenshot(&mut h, "review-request-rate-cursor");
+    for (tab, label, _) in TABS {
+        let mut h = harness(egui::vec2(wide, 600.0), 1.0, "en");
+        let other = if tab == SettingsTab::General { SettingsTab::Safety } else { SettingsTab::General };
+        h.state_mut().state.settings_tab = other;
+        h.run_steps(3);
+        h.get_by_label(label).focus();
+        h.run_steps(3);
+        assert!(h.get_by_label(label).is_focused());
+        for (name, width) in [("narrow", narrow), ("wide", wide)] {
+            h.state_mut().state.settings_tab = other;
+            h.run_steps(3);
+            h.set_size(egui::vec2(width, 600.0));
+            h.run_steps(4);
+            if !h.get_by_label(label).is_focused() || !modal(&h).contains_rect(h.get_by_label(label).rect()) {
+                failures.push(format!("review/tab-orientation/{label}/{name}: focused tab was lost or hidden"));
+            }
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+            if h.state().state.settings_tab != tab {
+                failures.push(format!("review/tab-activation/{label}/{name}: Enter did not activate the focused tab"));
+            }
+            if tab == SettingsTab::About {
+                screenshot(&mut h, &format!("review-oriented-tab-About-{name}"));
+            }
+        }
+    }
 }
 
 fn drafts_survive_resizing(failures: &mut Vec<String>) {

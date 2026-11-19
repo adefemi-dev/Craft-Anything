@@ -1992,7 +1992,8 @@ Gaps found while using the app for real projects.
       navigation, Close, long plugin entries and resizing. Review regressions also cover populated
       server-model dropdowns and menus, measured translated API-key rows, repeated save failures
       and full-app error presentation without duplicate overlays. Resize regressions retain backend
-      drafts and pending saves and keep focused tabs visible. Offscreen Linux checks; native
+      drafts and pending saves, keep focused tabs visible and preserve typing and tab activation
+      across rail orientation changes. Offscreen Linux checks; native
       Windows/macOS and screen-reader runs were not verified (found in #1301's review)
       — claimed: MacallanTheRoot, branch bugfix/r2.9-responsive-settings-dialog — PR #2148
 

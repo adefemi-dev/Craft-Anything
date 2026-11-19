@@ -1103,3 +1103,126 @@ fn a_named_operation_that_was_not_read_is_not_taken_for_a_query() {
     assert!(!graphql_reads(&v), "the mutation may be past what was read");
     assert!(graphql_reads(&json!({"query": doc, "operationName": "Q3"})));
 }
+
+#[test]
+fn a_write_kept_as_an_unavailable_304_ends_no_reads() {
+    let s = built(vec![
+        entry("GET", &format!("{A}/notes"), 200, r#"{"notes":[]}"#),
+        entry("PUT", &format!("{A}/notes"), 304, ""),
+        entry("GET", &format!("{A}/notes"), 200, r#"{"notes":[7]}"#),
+    ]);
+    let put = s.routes.iter().find(|r| r.method == "PUT").unwrap();
+    assert_eq!(put.samples[0].status, 304, "kept as evidence");
+    assert!(matches!(answer(&s, &mut Turns::default(), "PUT", "/notes", "", b""), Answer::NoMatch(_)), "no client can replay it");
+    let mut t = Turns::default();
+    let reads: Vec<String> = (0..3).map(|_| read_notes(&s, &mut t)).collect();
+    assert_eq!(reads, [r#"{"notes":[]}"#, r#"{"notes":[7]}"#, r#"{"notes":[]}"#], "both reads go round as if it weren't there");
+    // A replayable write between the same reads still ends the first one.
+    let s = built(vec![
+        entry("GET", &format!("{A}/notes"), 200, r#"{"notes":[]}"#),
+        entry("PUT", &format!("{A}/notes"), 200, "{}"),
+        entry("GET", &format!("{A}/notes"), 200, r#"{"notes":[7]}"#),
+    ]);
+    let mut t = Turns::default();
+    assert_eq!([read_notes(&s, &mut t), read_notes(&s, &mut t)], [r#"{"notes":[]}"#, r#"{"notes":[]}"#]);
+}
+
+#[test]
+fn a_write_to_a_path_with_an_empty_segment_moves_only_its_own_reads() {
+    let s = built(vec![
+        entry("GET", &format!("{A}/api/notes"), 200, r#"{"notes":[]}"#),
+        entry("POST", &format!("{A}/api//notes"), 201, "{}"),
+        entry("GET", &format!("{A}/api/notes"), 200, r#"{"notes":[7]}"#),
+    ]);
+    assert!(templates(&s).contains(&"POST /api//notes".to_string()), "{:?}", templates(&s));
+    let mut t = Turns::default();
+    let _ = answer(&s, &mut t, "POST", "/api//notes", "", b"");
+    assert_eq!(body(&found(get(&s, &mut t, "/api/notes", ""))), r#"{"notes":[]}"#, "replay answers the two apart, so the write isn't this read's");
+    for (a, b, yes) in [
+        ("/api//notes", "/api/notes", false),
+        ("/api//notes", "/api//notes/{id}", true),
+        ("/api//notes", "/api", true),
+        ("/notes/", "/notes/{id}", true),
+        ("/", "/", true),
+        ("", "/a", true),
+    ] {
+        assert_eq!((related(a, b), related(b, a)), (yes, yes), "{a} {b}");
+    }
+}
+
+#[test]
+fn only_a_post_carrying_a_graphql_query_counts_as_a_read() {
+    let patch = |status: i64| {
+        let mut e = entry("PATCH", &format!("{A}/items/7"), status, "{}");
+        e["request"]["postData"] = json!({"mimeType": "application/json", "text": r#"{"query":"{ title }"}"#});
+        e
+    };
+    let s = built(vec![
+        entry("GET", &format!("{A}/items/7"), 200, r#"{"title":"old"}"#),
+        patch(200),
+        entry("GET", &format!("{A}/items/7"), 200, r#"{"title":"new"}"#),
+    ]);
+    let patched = s.routes.iter().find(|r| r.method == "PATCH").unwrap();
+    assert!(patched.samples[0].write, "a REST field named query is still a write");
+    let mut t = Turns::default();
+    let _ = answer(&s, &mut t, "PATCH", "/items/7", "", br#"{"query":"{ title }"}"#);
+    assert_eq!(body(&found(get(&s, &mut t, "/items/7", ""))), r#"{"title":"new"}"#);
+    let query = json!({"query": "{ title }"});
+    assert!(is_write("PATCH", Some(&query)) && is_write("PUT", Some(&query)) && is_write("DELETE", Some(&query)));
+    assert!(!is_write("POST", Some(&query)) && !is_write("GET", Some(&query)));
+}
+
+#[test]
+fn a_named_operation_answered_by_another_ones_recording_moves_nothing() {
+    let mut add = entry("POST", &format!("{A}/graphql"), 200, r#"{"data":{"added":1}}"#);
+    add["request"]["postData"] = json!({"text": r#"{"query":"mutation PrivateAdd { add }","operationName":"PrivateAdd"}"#});
+    let entries = vec![entry("GET", &format!("{A}/graphql"), 200, r#"{"n":0}"#), add, entry("GET", &format!("{A}/graphql"), 200, r#"{"n":1}"#)];
+    let opts = BuildOptions { hidden_values: vec!["PrivateAdd".into()], ..Default::default() };
+    let s = build_from_bytes(&har_of(entries.clone()), &opts).unwrap();
+    let post = s.routes.iter().find(|r| r.method == "POST").unwrap();
+    assert_eq!(post.samples[0].request_key, None, "the hidden name stays out of the file");
+    let mut t = Turns::default();
+    let clear = br#"{"query":"mutation Clear { clear }","operationName":"Clear"}"#;
+    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/graphql", "", clear))), r#"{"data":{"added":1}}"#, "the recorded answer, as before");
+    assert_eq!(t.position(), None);
+    assert_eq!(body(&found(get(&s, &mut t, "/graphql", ""))), r#"{"n":0}"#, "later reads stay where they were");
+    // Recorded by name, the same operation still steps.
+    let s = built(entries);
+    let mut t = Turns::default();
+    let private = br#"{"query":"mutation PrivateAdd { add }","operationName":"PrivateAdd"}"#;
+    let _ = answer(&s, &mut t, "POST", "/graphql", "", private);
+    assert_eq!(t.position(), Some(1));
+    assert_eq!(body(&found(get(&s, &mut t, "/graphql", ""))), r#"{"n":1}"#);
+}
+
+#[test]
+fn a_body_of_another_kind_steps_each_recorded_kind_on_its_own() {
+    let post = |req: &str, resp: &str| {
+        let mut e = entry("POST", &format!("{A}/search"), 200, resp);
+        e["request"]["postData"] = json!({"mimeType": "application/json", "text": req});
+        e
+    };
+    let s = built(vec![post(r#"{"q":"a"}"#, r#"{"by":"q"}"#), post(r#"{"tag":"b"}"#, r#"{"by":"tag 1"}"#), post(r#"{"tag":"c"}"#, r#"{"by":"tag 2"}"#)]);
+    let mut t = Turns::default();
+    let other: Vec<String> = (0..4).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#)))).collect();
+    assert_eq!(other, [r#"{"by":"q"}"#, r#"{"by":"tag 1"}"#, r#"{"by":"tag 2"}"#, r#"{"by":"tag 2"}"#], "past them all, the last one again");
+    // A body of a recorded kind still takes only its own.
+    let mut t = Turns::default();
+    let tags: Vec<String> = (0..3).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"tag":"x"}"#)))).collect();
+    assert_eq!(tags, [r#"{"by":"tag 1"}"#, r#"{"by":"tag 2"}"#, r#"{"by":"tag 2"}"#]);
+}
+
+#[test]
+fn a_read_answered_before_its_time_takes_no_turn_from_the_reads_after_the_write() {
+    let s = built(vec![
+        entry("POST", &format!("{A}/job"), 202, r#"{"started":true}"#),
+        entry("GET", &format!("{A}/job"), 200, r#"{"state":"running"}"#),
+        entry("GET", &format!("{A}/job"), 200, r#"{"state":"done"}"#),
+    ]);
+    let mut t = Turns::default();
+    let early = found(get(&s, &mut t, "/job", ""));
+    assert_eq!((body(&early).as_str(), early.turn, early.of), (r#"{"state":"running"}"#, 1, 1));
+    let _ = answer(&s, &mut t, "POST", "/job", "", b"");
+    let seen: Vec<String> = (0..3).map(|_| body(&found(get(&s, &mut t, "/job", "")))).collect();
+    assert_eq!(seen, [r#"{"state":"running"}"#, r#"{"state":"done"}"#, r#"{"state":"running"}"#]);
+}

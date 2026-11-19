@@ -878,6 +878,8 @@ pub fn build(har: &Har, opts: &BuildOptions) -> StandIn {
     // The place of the last accepted write kept for each template: a read answered the same either
     // side of a related one is kept twice, since the two say what was there before and after.
     let mut kept_writes: BTreeMap<String, u64> = BTreeMap::new();
+    // The latest of them, so a read repeated long after every write needn't look through them all.
+    let mut latest_kept_write: Option<u64> = None;
     for s in &seen {
         let template = s.segs.join("/");
         let key = (template.clone(), s.method.clone());
@@ -915,7 +917,10 @@ pub fn build(har: &Har, opts: &BuildOptions) -> StandIn {
         // is its own step through the recording, so writes are all kept.
         let repeats_last = |sample: &Sample| {
             route.samples.last().is_some_and(|last| {
-                let written_since = || kept_writes.iter().any(|(t, o)| last.order.is_none_or(|l| *o > l) && related(t, &route.template));
+                let written_since = || {
+                    latest_kept_write.is_some_and(|w| after(w, last.order))
+                        && kept_writes.iter().any(|(t, o)| after(*o, last.order) && related(t, &route.template))
+                };
                 !last.write && same_sample(last, sample) && !written_since()
             })
         };
@@ -952,6 +957,7 @@ pub fn build(har: &Har, opts: &BuildOptions) -> StandIn {
             }
             if accepted(&sample) {
                 kept_writes.insert(route.template.clone(), s.order);
+                latest_kept_write = latest_kept_write.max(Some(s.order));
             }
             route.samples.push(sample);
         }
@@ -1213,23 +1219,31 @@ impl Turns {
     }
 }
 
-/// A write the original accepted: answered without an error.
+/// A write the original accepted: answered without an error. A 304 still kept as one has no body
+/// to replay, so no client can get past it.
 fn accepted(s: &Sample) -> bool {
-    s.write && (200..400).contains(&s.status)
+    s.write && (200..400).contains(&s.status) && s.status != 304
 }
 
 /// Whether a write to one path template can change what a read of the other returns: one is the
 /// other, or lies under it (`/notes` and `/notes/{id}`, `/cart` and `/cart/items`). Templates are
 /// worked out for each method apart, so `{id}` stands for any segment (`/notes/b` and `/notes/{id}`).
 fn related(a: &str, b: &str) -> bool {
-    let b = b.split('/').filter(|s| !s.is_empty());
-    a.split('/').filter(|s| !s.is_empty()).zip(b).all(|(x, y)| x == y || x == ID || y == ID)
+    template_segments(a).zip(template_segments(b)).all(|(x, y)| x == y || x == ID || y == ID)
 }
 
-/// A request that may change what later reads return: a method that isn't a read, unless its JSON
-/// body is GraphQL that only queries. `method` is upper case.
+/// A template's segments without the slashes at either end. One inside stays, as an empty segment:
+/// `/api//notes` is answered apart from `/api/notes`.
+fn template_segments(t: &str) -> impl Iterator<Item = &str> {
+    let t = t.strip_prefix('/').unwrap_or(t);
+    let t = t.strip_suffix('/').unwrap_or(t);
+    (!t.is_empty()).then(|| t.split('/')).into_iter().flatten()
+}
+
+/// A request that may change what later reads return: a method that isn't a read, unless it's a
+/// POST whose JSON body is GraphQL that only queries. `method` is upper case.
 fn is_write(method: &str, json: Option<&Value>) -> bool {
-    !READ_METHODS.contains(&method) && !json.is_some_and(graphql_reads)
+    !READ_METHODS.contains(&method) && !(method == "POST" && json.is_some_and(graphql_reads))
 }
 
 /// `order` comes after `place`, where no place is before the start.
@@ -1239,20 +1253,26 @@ fn after(order: u64, place: Option<u64>) -> bool {
 
 /// Narrow the fitting answers of route `ri` to the ones that apply at this client's place in the
 /// recording, and say whether they're writes to step through. A write request takes the first
-/// recorded write of its kind after the last one replayed, or the last there is. Otherwise the
+/// recorded write after the last one replayed of that write's own kind, or the last there is; a
+/// named GraphQL operation none of them recorded steps nothing. Otherwise the
 /// recorded reads apply: those between the last accepted write replayed on a related path and the
 /// next related one recorded, or else the earliest from after that place (which shows the client's
 /// own write), or else the newest from before it.
 /// When any answer has no place (a file from before version 2), all of them apply, as they did.
-fn on_timeline(standin: &StandIn, ri: usize, route: &StandInRoute, fit: Vec<usize>, turns: &Turns, write: bool) -> (Vec<usize>, bool) {
+fn on_timeline(standin: &StandIn, ri: usize, route: &StandInRoute, fit: Vec<usize>, turns: &Turns, write: bool, key: Option<&str>) -> (Vec<usize>, bool) {
     let placed: Option<Vec<(usize, u64, bool)>> = fit.iter().map(|i| route.samples.get(*i).and_then(|s| Some((*i, s.order?, s.write)))).collect();
     let Some(placed) = placed.filter(|p| !p.is_empty()) else { return (fit, false) };
     let first_by = |pool: &[(usize, u64, bool)], keep: &dyn Fn(u64) -> bool| pool.iter().filter(|x| keep(x.1)).min_by_key(|x| x.1).map(|x| x.0);
     let last_by = |pool: &[(usize, u64, bool)], keep: &dyn Fn(u64) -> bool| pool.iter().filter(|x| keep(x.1)).max_by_key(|x| x.1).map(|x| x.0);
     let (writes, reads): (Vec<_>, Vec<_>) = placed.iter().partition(|x| x.2);
     if write && !writes.is_empty() {
-        let cursor = turns.written.get(&write_kind(ri, route, &writes)).copied();
-        return (first_by(&writes, &|o| after(o, cursor)).or_else(|| last_by(&writes, &|_| true)).into_iter().collect(), true);
+        let kind = |x: &(usize, u64, bool)| route.samples.get(x.0).and_then(|s| s.request_key.clone());
+        // Another operation's answer (its name hidden from the file, say) isn't this one's step.
+        if key.is_some_and(|k| k.starts_with("op:")) && !writes.iter().any(|x| kind(x).as_deref() == key) {
+            return (writes.iter().map(|x| x.0).collect(), false);
+        }
+        let next = writes.iter().filter(|x| after(x.1, turns.written.get(&(ri, kind(x))).copied())).min_by_key(|x| x.1).map(|x| x.0);
+        return (next.or_else(|| last_by(&writes, &|_| true)).into_iter().collect(), true);
     }
     // A request named only by its operation can't be told from a write, but the recording can.
     let pool = if reads.is_empty() { placed } else { reads };
@@ -1267,12 +1287,6 @@ fn on_timeline(standin: &StandIn, ri: usize, route: &StandInRoute, fit: Vec<usiz
     }
     now.sort_by_key(|x| x.1);
     (now.into_iter().map(|x| x.0).collect(), false)
-}
-
-/// Which kind of write the candidates are: their route and recorded request key, so a write of one
-/// kind doesn't step past another kind's. Bounded by what the stand-in holds.
-fn write_kind(ri: usize, route: &StandInRoute, writes: &[(usize, u64, bool)]) -> (usize, Option<String>) {
-    (ri, writes.first().and_then(|x| route.samples.get(x.0)).and_then(|s| s.request_key.clone()))
 }
 
 fn template_fits(template: &str, path: &str) -> bool {
@@ -1402,11 +1416,17 @@ pub fn answer(standin: &StandIn, turns: &mut Turns, method: &str, path: &str, qu
     if fit.is_empty() {
         return Answer::NoMatch(NoMatch { reason: NoMatchReason::CachedBodyUnavailable, nearest: nearest(standin, look_for, &clean_path) });
     }
-    let (fit, stepping) = on_timeline(standin, ri, route, fit, turns, write);
-    let first = fit.first().copied().unwrap_or(0);
-    let counter = turns.turns.entry((ri, first, how)).or_insert(0);
-    let at = counter.checked_rem(fit.len()).unwrap_or(0);
-    *counter = counter.saturating_add(1);
+    let (fit, stepping) = on_timeline(standin, ri, route, fit, turns, write, key);
+    // A lone answer takes no turn, so a set that starts with it later starts at the beginning.
+    let at = match fit.first() {
+        Some(first) if fit.len() > 1 => {
+            let counter = turns.turns.entry((ri, *first, how)).or_insert(0);
+            let at = counter.checked_rem(fit.len()).unwrap_or(0);
+            *counter = counter.saturating_add(1);
+            at
+        }
+        _ => 0,
+    };
     let Some(sample) = fit.get(at).and_then(|i| route.samples.get(*i)) else {
         return Answer::NoMatch(NoMatch { reason: NoMatchReason::PathNotRecorded, nearest: Vec::new() });
     };

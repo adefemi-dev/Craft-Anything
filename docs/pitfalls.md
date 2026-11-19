@@ -1329,3 +1329,11 @@ exclusive-creation checks after selecting a name.
 then a fixed number of frames left the next action outside the settled layout. Wait for the
 background operation to finish and run immediate repaints after scrolling before clicking;
 otherwise a missed click looks like a backend mutation that never completed.
+
+**Error text is not an occurrence identity.** Reusing a Settings scroll id derived only from
+the message hid an identical new save failure at the previous scroll offset. Track error events
+separately from their text, keeping the id stable between events. Render the whole app in the
+regression too: an isolated dialog missed the duplicate app-level error overlay. Exercise populated
+dropdowns with long values and their open menus; a truncated selected value alone does not bound
+custom popup rows. Measure translated controls with their actual frame semantics: TextEdit already
+includes its frame in its desired width.

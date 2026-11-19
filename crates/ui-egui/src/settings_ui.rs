@@ -131,7 +131,7 @@ fn page(app: &mut CraftApp, ui: &mut Ui, h: f32) {
     ui.set_width(w);
     let content_w = (w - ui.spacing().scroll.allocated_width() - 14.0).max(0.0);
     // A new save error starts in view, even if the person was editing near the page's end.
-    let page_id = egui::Id::new("settings-page").with(app.state.toasts.iter().rfind(|(_, error)| *error).map(|(text, _)| text));
+    let page_id = egui::Id::new("settings-page").with((app.toast_error_revision, app.state.toasts.iter().rfind(|(_, error)| *error).map(|(text, _)| text)));
     // Fixed bounds across tabs, with the header outside the scrolling page.
     egui::ScrollArea::vertical().id_salt(page_id).auto_shrink([false, false]).min_scrolled_height(h).max_height(h).max_width(w).show(ui, |ui| {
         ui.set_max_width(content_w);
@@ -1066,12 +1066,12 @@ pub(crate) fn server_form(app: &mut CraftApp, ui: &mut Ui) {
     // The server listed several chat models and didn't say which is loaded: the person chooses
     // (#1434). A list for another address is out of date and isn't offered.
     if let Some((address, models)) = form.choices.as_ref().filter(|(a, _)| *a == form.address.trim()) {
-        ui.horizontal(|ui| {
+        controls(ui, |ui| {
             ui.label(RichText::new(tr("This server lists several chat models. Choose one:")).color(t.text_faint).size(theme::CAPTION));
             let shown = if form.model.trim().is_empty() { tr("Choose a model") } else { form.model.clone() };
-            let r = widgets::dropdown("server-model-choice").selected_text(shown).show_ui(ui, |ui| {
+            let r = widgets::dropdown("server-model-choice").width(ui.available_size_before_wrap().x).selected_text(shown).truncate().show_ui(ui, |ui| {
                 for m in models {
-                    if widgets::menu_item(ui, form.model.trim() == m, m.as_str()).clicked() {
+                    if widgets::menu_item_truncated(ui, form.model.trim() == m, m.as_str()).on_hover_text(m).clicked() {
                         form.model = m.clone();
                         form.picked = Some((address.clone(), m.clone()));
                     }

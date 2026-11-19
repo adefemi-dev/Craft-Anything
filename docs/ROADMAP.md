@@ -1989,7 +1989,9 @@ Gaps found while using the app for real projects.
       strip and stacked settings; wider ones keep the left rail, which scrolls when short.
       Pages and long save errors scroll vertically. Rendered layout tests cover all seven tabs
       at 760×520 / 2×, 900×600 and 1440×900 in English, Turkish and German, plus keyboard
-      navigation, Close, long plugin entries and resizing. Offscreen Linux checks; native
+      navigation, Close, long plugin entries and resizing. Review regressions also cover populated
+      server-model dropdowns and menus, measured translated API-key rows, repeated save failures
+      and full-app error presentation without duplicate overlays. Offscreen Linux checks; native
       Windows/macOS and screen-reader runs were not verified (found in #1301's review)
       — claimed: MacallanTheRoot, branch bugfix/r2.9-responsive-settings-dialog — PR #2148
 

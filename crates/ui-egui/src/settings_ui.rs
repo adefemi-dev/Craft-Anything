@@ -34,7 +34,7 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
             });
         });
         ui.add_space(theme::space::MD);
-        if width < 720.0 {
+        if width < theme::breakpoint::SETTINGS_RAIL {
             // A rail would leave too little room for a control at high zoom. The same named,
             // focusable tabs scroll horizontally instead, without reducing the type size.
             egui::ScrollArea::horizontal().id_salt("settings-tabs-horizontal").auto_shrink([false, true]).show(ui, |ui| {
@@ -77,6 +77,7 @@ fn tabs(app: &mut CraftApp, ui: &mut Ui, horizontal: bool, height: f32) {
         d.insert_temp(id, shown);
         previous != Some(shown)
     });
+    let (mut selected_rect, mut focused_rect) = (None, None);
     for (tab, icon, title) in [
         (SettingsTab::General, "settings", "General"),
         (SettingsTab::Engines, "cpu", "Engines"),
@@ -113,8 +114,11 @@ fn tabs(app: &mut CraftApp, ui: &mut Ui, horizontal: bool, height: f32) {
             t.text,
         );
         widgets::focus_ring(ui, &r, rect);
-        if r.gained_focus() || (on && changed) {
-            r.scroll_to_me(None);
+        if on && changed {
+            selected_rect = Some(rect);
+        }
+        if r.gained_focus() || (r.has_focus() && changed) {
+            focused_rect = Some(rect);
         }
         if r.clicked() {
             app.state.settings_tab = tab;
@@ -122,6 +126,20 @@ fn tabs(app: &mut CraftApp, ui: &mut Ui, horizontal: bool, height: f32) {
                 app.detect_backends();
             }
         }
+    }
+    // egui keeps only the last scroll request. Include both tabs when they fit; otherwise
+    // keep keyboard focus visible (the selected tab is still reachable by scrolling).
+    let target = match (selected_rect, focused_rect) {
+        (Some(selected), Some(focused)) => {
+            let both = selected.union(focused);
+            let fits = if horizontal { both.width() <= ui.clip_rect().width() } else { both.height() <= ui.clip_rect().height() };
+            Some(if fits { both } else { focused })
+        }
+        (_, Some(focused)) => Some(focused),
+        (selected, None) => selected,
+    };
+    if let Some(rect) = target {
+        ui.scroll_to_rect(rect, Some(egui::Align::Center));
     }
 }
 
@@ -162,12 +180,12 @@ fn page(app: &mut CraftApp, ui: &mut Ui, h: f32) {
 /// Nested controls (notably dropdowns) measure a child UI before their parent can wrap it.
 /// Stack them in a narrow page so their combined widths cannot widen the dialog.
 fn controls<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
-    if ui.available_width() < 400.0 { ui.vertical(add) } else { ui.horizontal_wrapped(add) }
+    if ui.available_width() < theme::breakpoint::SETTINGS_CONTROLS { ui.vertical(add) } else { ui.horizontal_wrapped(add) }
 }
 
 fn row(ui: &mut Ui, title: &str, sub: &str, add: impl FnOnce(&mut Ui)) {
     let t = Tokens::get(ui.ctx());
-    let narrow = ui.available_width() < 560.0;
+    let narrow = ui.available_width() < theme::breakpoint::SETTINGS_LABELS;
     let labels = |ui: &mut Ui| {
         ui.set_width(if narrow { ui.available_width() } else { 280.0 });
         ui.label(RichText::new(tr(title)).font(theme::medium(theme::BODY)));
@@ -693,7 +711,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                 };
                 // One change at a time: jobs finish in any order, so a second change's refresh could land before the
                 // first's and Settings would show the older choice. The row waits for the saving job, as the rate does.
-                let job_id = ui.make_persistent_id(("tool-list-job", &b.name));
+                let job_id = egui::Id::new(("settings-tool-list-job", &b.name));
                 let pending_job = ui.data(|data| data.get_temp::<u64>(job_id));
                 let pending = app.jobs.running().any(|job| Some(job.id) == pending_job);
                 if !pending && pending_job.is_some() {
@@ -717,7 +735,9 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                     });
                 });
                 let saved = app.backend_options.get(&b.name).and_then(|o| o.requests_per_minute).unwrap_or_default();
-                let id = ui.make_persistent_id(("request-rate", &b.name));
+                // Drafts and pending jobs belong to this backend, independently of the
+                // responsive parent UI or a new error's scroll-area identity.
+                let id = egui::Id::new(("settings-request-rate", &b.name));
                 let saved_text = if saved == 0 { String::new() } else { saved.to_string() };
                 let (mut text, pending_job) = ui.data(|data| data.get_temp::<(String, Option<u64>)>(id)).unwrap_or((saved_text.clone(), None));
                 let pending = app.jobs.running().any(|job| Some(job.id) == pending_job);

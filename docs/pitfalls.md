@@ -1337,3 +1337,10 @@ regression too: an isolated dialog missed the duplicate app-level error overlay.
 dropdowns with long values and their open menus; a truncated selected value alone does not bound
 custom popup rows. Measure translated controls with their actual frame semantics: TextEdit already
 includes its frame in its desired width.
+
+**Responsive parents changed transient Settings identities.** A `make_persistent_id` is still
+relative to its UI: moving a page between a column and a row lost a backend draft and its pending
+job marker. Namespace backend drafts and job ids independently of layout and error-scroll ids.
+On resize, consider keyboard focus separately from selection; egui keeps only the last scroll
+request, so combine the two rectangles when both fit and keep focus visible otherwise. Verify
+both tab orders and that ordinary frames still allow manual scrolling.

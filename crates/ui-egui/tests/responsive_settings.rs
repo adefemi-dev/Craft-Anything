@@ -6,7 +6,7 @@ use craft_anything_engine::Mode;
 use craft_anything_ui_egui::state::SettingsTab;
 use craft_anything_ui_egui::{CraftApp, demo, i18n, settings_ui, theme};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 const TABS: [(SettingsTab, &str, &str); 7] = [
     (SettingsTab::General, "General", "Mode"),
@@ -60,6 +60,8 @@ fn screenshot(h: &mut Harness<'_, CraftApp>, name: &str) {
 #[test]
 fn settings_fits_and_remains_usable_in_each_viewport_and_language() {
     let mut failures = Vec::new();
+    drafts_survive_resizing(&mut failures);
+    focused_tabs_survive_resizing(&mut failures);
     server_model_choices_fit(&mut failures);
     translated_key_rows_fit(&mut failures);
     repeated_errors_return_into_view(&mut failures);
@@ -136,6 +138,78 @@ fn settings_fits_and_remains_usable_in_each_viewport_and_language() {
     assert!(failures.is_empty(), "{} layout failures:\n{}", failures.len(), failures.join("\n"));
     navigation_and_editing();
     longer_content_and_resize();
+}
+
+fn drafts_survive_resizing(failures: &mut Vec<String>) {
+    let wide = theme::breakpoint::SETTINGS_RAIL + 2.0 * theme::space::XXL + 1.0;
+    let narrow = wide - 2.0;
+    let mut h = harness(egui::vec2(wide, 600.0), 1.0, "en");
+    h.state_mut().state.settings_tab = SettingsTab::Ai;
+    h.run_steps(4);
+    h.get_by_label("Requests per minute").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Requests per minute").focus();
+    h.get_by_label("Requests per minute").type_text("137");
+    h.run_steps(3);
+    assert_eq!(h.get_by_label("Requests per minute").value().as_deref(), Some("137"));
+    for width in [narrow, wide] {
+        h.set_size(egui::vec2(width, 600.0));
+        h.run_steps(4);
+        if h.get_by_label("Requests per minute").value().as_deref() != Some("137") {
+            failures.push(format!("review/resize-draft/{width}: request-rate draft disappeared"));
+        }
+    }
+    screenshot(&mut h, "review-request-rate-draft");
+    h.state_mut().toast("A save failed while editing a request rate.", true);
+    h.run_steps(4);
+    assert_eq!(h.get_by_label("Requests per minute").value().as_deref(), Some("137"), "new errors preserve drafts too");
+    h.get_by_label("Apply").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Apply").click();
+    h.run_steps(4);
+    assert!(h.get_by_label("Requests per minute").accesskit_node().is_disabled(), "the pending save disables its row");
+    // This focused harness does not poll jobs: their pending UI state must survive the resize.
+    for width in [narrow, wide] {
+        h.set_size(egui::vec2(width, 600.0));
+        h.run_steps(4);
+        if !h.get_by_label("Requests per minute").accesskit_node().is_disabled() {
+            failures.push(format!("review/resize-pending/{width}: a pending save became editable"));
+        }
+    }
+}
+
+fn focused_tabs_survive_resizing(failures: &mut Vec<String>) {
+    for (selected, focused) in
+        [(SettingsTab::General, "About"), (SettingsTab::Safety, "About"), (SettingsTab::About, "General"), (SettingsTab::About, "Safety")]
+    {
+        let mut h = harness(egui::vec2(1440.0, 900.0), 1.0, "en");
+        h.state_mut().state.settings_tab = selected;
+        h.run_steps(4);
+        h.get_by_label(focused).focus();
+        h.run_steps(4);
+        assert!(h.get_by_label(focused).is_focused());
+        h.set_size(egui::vec2(900.0, 260.0));
+        h.run_steps(4);
+        assert!(h.get_by_label(focused).is_focused(), "resizing preserves keyboard focus");
+        assert_eq!(h.state().state.settings_tab, selected, "focus does not activate a tab");
+        if !modal(&h).contains_rect(h.get_by_label(focused).rect()) {
+            failures.push(format!("review/resize-focus/{selected:?}: focused {focused} tab is outside Settings"));
+        }
+        // Adjacent selected/focused tabs can both fit in the shortened rail.
+        if selected == SettingsTab::Safety || focused == "Safety" {
+            let label = if selected == SettingsTab::Safety { "Safety" } else { "About" };
+            if !modal(&h).contains_rect(h.get_by_label(label).rect()) {
+                failures.push(format!("review/resize-focus: selected {label} tab is outside Settings"));
+            }
+        }
+        screenshot(&mut h, &format!("review-focused-tab-{selected:?}-{focused}"));
+        h.get_by_label("General").scroll_to_me();
+        h.run_steps(4);
+        let scrolled = h.get_by_label("General").rect();
+        assert!(modal(&h).contains_rect(scrolled), "manual scrolling remains available with a focused tab");
+        h.run_steps(4);
+        assert_eq!(h.get_by_label("General").rect(), scrolled, "ordinary frames do not pull the rail back");
+    }
 }
 
 fn server_model_choices_fit(failures: &mut Vec<String>) {

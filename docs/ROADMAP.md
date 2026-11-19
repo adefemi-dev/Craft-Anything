@@ -1640,6 +1640,7 @@ Gaps found while using the app for real projects.
       report for the new project can name the old project's target, and annotations saved after
       the switch go to the new project's store. Decide whether opening a project closes the
       targets or reloads their annotations from the new one
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.9-project-switch-targets
 - [x] A Clean room build or question must also not resume an API backend's kept transcript:
       `ws.transcript_path()` is loaded whenever it exists, so switching modes can carry what a Deep
       API build read. Clear it, or record its mode, when the mode changes; add a regression

@@ -1530,6 +1530,8 @@ dependencies = [
  "craft-anything-engine",
  "craft-anything-evidence",
  "craft-anything-platform",
+ "craft-jsonrpc",
+ "craft-mcp-server",
  "log",
  "serde",
  "serde_json",
@@ -1691,12 +1693,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-jsonrpc"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=42e0bd548246c4d34637b2b75945c9ce8ec9f98b#42e0bd548246c4d34637b2b75945c9ce8ec9f98b"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "craft-macho"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=d118983bf922ac96c68b885dc55da30435adbc7d#d118983bf922ac96c68b885dc55da30435adbc7d"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-mcp-server"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=42e0bd548246c4d34637b2b75945c9ce8ec9f98b#42e0bd548246c4d34637b2b75945c9ce8ec9f98b"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

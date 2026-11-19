@@ -2467,6 +2467,7 @@ Owner: open · Status: in progress
 ### R3.14 Read-only project and scene viewer
 <!-- Explicit user-requested interface follow-up, 2026-11-12. -->
 Owner: open · Status: in progress (experimental 3D/4D/5D available; parity expansion remains open)
+- [ ] Inventory all observed SP sections, distinguish decoded storage from semantic/evaluator/native coverage, and publish a source-bound reader-first decoder backlog before expanding authoring. -- claimed: Codex, branch `docs/r3.14-sp-read-coverage`
 - [x] Add an identity/appearance evidence audit and revalidate retained controlled cases; preserve unverified native ID and material semantics. -- claimed: Codex, branch `feature/r3.14-scene-bundle-viewport`
 - [x] Finish the V2 baseline validation and retain the delivered planning interface in a reviewable commit. -- claimed: Codex, branch `feature/r3.14-scene-bundle-viewport`
 - [x] Add an interactive orientation cube and persistent scene-bound saved viewpoints through headless tools. -- claimed: Codex, branch `feature/r3.14-scene-bundle-viewport`

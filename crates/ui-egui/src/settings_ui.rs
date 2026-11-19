@@ -48,15 +48,7 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
             ui.horizontal_top(|ui| {
                 let mut tabs = |ui: &mut Ui| {
                     ui.set_width(150.0);
-                    for (tab, icon, title) in [
-                        (SettingsTab::General, "settings", "General"),
-                        (SettingsTab::Engines, "cpu", "Engines"),
-                        (SettingsTab::Ai, "bot", "AI"),
-                        (SettingsTab::Builds, "hammer", "Builds"),
-                        (SettingsTab::Plugins, "puzzle", "Plugins"),
-                        (SettingsTab::Safety, "shield", "Safety"),
-                        (SettingsTab::About, "info", "About"),
-                    ] {
+                    for (tab, icon, title) in TABS {
                         // About sits at the bottom of the list, level with the end of the page.
                         if tab == SettingsTab::About {
                             ui.add_space((page_height(ctx) - ui.min_rect().height() - TAB_H).max(theme::space::SM));
@@ -95,7 +87,8 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
                 // list that just fits showed its bar on one frame and not the next, moving the
                 // page under the pointer. Top-down inside: an area takes the row's layout.
                 let item_gap = ui.spacing().item_spacing.y;
-                let list_h = 7.0 * TAB_H + 6.0 * item_gap + theme::space::SM;
+                let n = TABS.len() as f32;
+                let list_h = n * TAB_H + (n - 1.0) * item_gap + theme::space::SM;
                 ui.vertical(|ui| {
                     if page_height(ctx) >= list_h {
                         tabs(ui);
@@ -160,6 +153,17 @@ fn row(ui: &mut Ui, title: &str, sub: &str, add: impl FnOnce(&mut Ui)) {
 
 /// A tab's row in Settings' list.
 const TAB_H: f32 = 34.0;
+
+/// Settings' tabs, top to bottom: the tab, its icon and its title.
+const TABS: [(SettingsTab, &str, &str); 7] = [
+    (SettingsTab::General, "settings", "General"),
+    (SettingsTab::Engines, "cpu", "Engines"),
+    (SettingsTab::Ai, "bot", "AI"),
+    (SettingsTab::Builds, "hammer", "Builds"),
+    (SettingsTab::Plugins, "puzzle", "Plugins"),
+    (SettingsTab::Safety, "shield", "Safety"),
+    (SettingsTab::About, "info", "About"),
+];
 
 /// How tall a tab's page is: as tall as the window allows, so a tab's settings aren't cut off at
 /// the fold. A short window (260 points at 2× zoom) gets what's left beside the dialog's heading

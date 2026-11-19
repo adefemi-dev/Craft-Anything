@@ -11,3 +11,5 @@ Auto: building tools only below a 64k window, every tool from there.
 Auto: every tool, as this AI is a paid service.
 Change a builder's tools
 That folder's name has characters Craft Anything can't read. Pick another folder.
+Choose what builds a project
+Builds this project's next changes. A build that's running keeps its own AI.

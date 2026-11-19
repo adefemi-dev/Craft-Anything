@@ -172,6 +172,32 @@ impl CraftApp {
         }
     }
 
+    /// Choose what builds a project's next changes (`None`: Automatic again), through the
+    /// project_builder_set tool. An agent app that was only found is set up first, as Start does,
+    /// since the tool takes only an AI that is set up. Shown at once; the tool's answer is kept.
+    pub fn set_project_builder(&mut self, root: &std::path::Path, builder: Option<String>) {
+        if let Some(name) = &builder
+            && self.builder_backend(Some(name)).as_deref() != Some(name.as_str())
+        {
+            return;
+        }
+        if let Some(ws) = self.workspace.as_mut().filter(|w| w.root == root) {
+            ws.manifest.builder.clone_from(&builder);
+        }
+        let params = serde_json::json!({"project": root, "builder": builder.as_deref().unwrap_or("default")});
+        self.act("project_builder_set", params, tr("Choose what builds a project"));
+    }
+
+    /// After project_builder_set: show what the project saved (also when it refused the choice).
+    pub(crate) fn project_builder_set(&mut self, params: &serde_json::Value, result: Result<serde_json::Value, craft_anything_engine::evidence::ToolError>) {
+        if let Some(ws) = self.workspace.as_mut().filter(|w| params["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p))) {
+            let _ = ws.reload();
+        }
+        if let Err(e) = result {
+            self.toast(e.for_people(), true);
+        }
+    }
+
     /// Turn an AI on or off in Settings → AI (it keeps its key).
     pub fn set_backend_enabled(&mut self, name: &str, on: bool) {
         let (hub, name) = (self.hub.clone(), name.to_string());
@@ -389,24 +415,55 @@ pub fn built_by(app: &mut CraftApp, ui: &mut Ui) {
         app.state.make.ai = None;
         app.toast(replaced_builder_notice(saved, &default), false);
     }
-    let automatic = trf("Automatic ({name})", &[("name", &default)]);
-    let shown = app.state.make.ai.clone().unwrap_or_else(|| automatic.clone());
     ui.label(RichText::new(tr("Built by")).size(theme::BODY).color(t.text_dim));
+    let found = tr("found on this computer; set up when you start");
+    if let Some(p) = choose(ui, "built-by", app.state.make.ai.as_deref(), &default, &choices, &found).1 {
+        app.state.make.ai = p;
+    }
+}
+
+/// The "Built by" dropdown: Automatic (what `default` is) or one of `choices`, with `chosen`
+/// selected. Returns the response and the pick, if one was made (`Some(None)`: Automatic).
+fn choose(ui: &mut Ui, id: &str, chosen: Option<&str>, default: &str, choices: &[Choice], found: &str) -> (egui::Response, Option<Option<String>>) {
+    let automatic = trf("Automatic ({name})", &[("name", default)]);
+    let shown = chosen.map_or_else(|| automatic.clone(), str::to_string);
     let mut pick = None;
-    let r = widgets::dropdown("built-by").selected_text(shown).width(220.0).show_ui(ui, |ui| {
-        if widgets::menu_item(ui, app.state.make.ai.is_none(), automatic).on_hover_text(tr("Whatever Settings → AI builds with.")).clicked() {
+    let r = widgets::dropdown(id).selected_text(shown).width(220.0).show_ui(ui, |ui| {
+        if widgets::menu_item(ui, chosen.is_none(), automatic).on_hover_text(tr("Whatever Settings → AI builds with.")).clicked() {
             pick = Some(None);
         }
-        for c in &choices {
-            let note = if c.found { format!("{} · {}", c.detail, tr("found on this computer; set up when you start")) } else { c.detail.clone() };
-            if widgets::menu_item(ui, app.state.make.ai.as_ref() == Some(&c.name), &c.name).on_hover_text(note).clicked() {
+        for c in choices {
+            let note = if c.found { format!("{} · {found}", c.detail) } else { c.detail.clone() };
+            if widgets::menu_item(ui, chosen == Some(c.name.as_str()), &c.name).on_hover_text(note).clicked() {
                 pick = Some(Some(c.name.clone()));
             }
         }
     });
-    widgets::named(r.response, "Built by");
+    (widgets::named(r.response, "Built by"), pick)
+}
+
+/// "Built by" on a project's page: the AI that builds its next changes, read from the project and
+/// changed through `project_builder_set`, as the CLI and MCP change it. A saved choice that was
+/// turned off or removed shows Automatic, with who builds instead; nothing is shown while no AI
+/// can build (starting a build says how to set one up).
+pub fn project_built_by(app: &mut CraftApp, ui: &mut Ui, ws: &craft_anything_engine::workspace::Workspace) {
+    let Some(default) = app.default_builder() else { return };
+    let t = Tokens::get(ui.ctx());
+    let choices = app.builder_choices();
+    let saved = ws.manifest.builder.as_deref().filter(|b| !b.is_empty());
+    let kept = saved.filter(|b| choices.iter().any(|c| c.name == *b));
+    ui.add_space(theme::space::SM);
+    widgets::caption(ui, "Built by");
+    let found = tr("Found on this computer");
+    // One pick at a time: two saves on separate workers could land in either order.
+    let saving = app.jobs.running().any(|j| j.title == tr("Choose what builds a project"));
+    let (r, pick) = ui.add_enabled_ui(!saving, |ui| choose(ui, "project-built-by", kept, &default, &choices, &found)).inner;
+    r.on_hover_text(tr("Builds this project's next changes. A build that's running keeps its own AI."));
+    if let Some(saved) = saved.filter(|_| kept.is_none()) {
+        ui.add(egui::Label::new(RichText::new(replaced_builder_notice(saved, &default)).color(t.warning).size(theme::CAPTION)).wrap());
+    }
     if let Some(p) = pick {
-        app.state.make.ai = p;
+        app.set_project_builder(&ws.root, p);
     }
 }
 

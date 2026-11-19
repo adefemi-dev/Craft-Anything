@@ -159,11 +159,14 @@ fn own_toolchains(stack: &str, app: &std::path::Path) -> Vec<&'static Toolchain>
     names.iter().filter_map(|name| tools.iter().find(|t| t.name == *name).filter(here)).collect()
 }
 
-/// The toolchain `stack` is written in: of those there, the one whose project file was written
-/// last (a Java port that added build.gradle.kts beside an old pom.xml is Gradle), else the
-/// table's first.
-fn own_toolchain(stack: &str, app: &std::path::Path) -> Option<&'static Toolchain> {
+/// The toolchain `stack` is written in: of those there, `chosen` (the one a move was confirmed
+/// with), else the one whose project file was written last (a Java port that added
+/// build.gradle.kts beside an old pom.xml is Gradle), else the table's first.
+fn own_toolchain(stack: &str, chosen: Option<&str>, app: &std::path::Path) -> Option<&'static Toolchain> {
     let found = own_toolchains(stack, app);
+    if let Some(t) = found.iter().find(|t| Some(t.name.as_str()) == chosen) {
+        return Some(t);
+    }
     let mut best = *found.first()?;
     let mut newest = best.newest_marker(app);
     for &t in &found[1..] {
@@ -178,14 +181,14 @@ fn own_toolchain(stack: &str, app: &std::path::Path) -> Option<&'static Toolchai
 /// Whether `stack` is a language other than Node.js whose files are still in `app`: a
 /// package.json left from before a move then says nothing about what the build uses.
 pub fn holds_its_language(stack: &str, app: &std::path::Path) -> bool {
-    own_toolchain(stack, app).is_some_and(|t| t.name != "Node.js")
+    own_toolchain(stack, None, app).is_some_and(|t| t.name != "Node.js")
 }
 
-/// The toolchain `app` is built with: the recorded stack's when its files are there, since a
-/// project moved to another language can still hold the old one's manifest (#1837); else the
-/// first found.
-pub fn toolchain_for(stack: &str, app: &std::path::Path) -> Option<&'static Toolchain> {
-    own_toolchain(stack, app).or_else(|| toolchain_in(app))
+/// The toolchain `app` is built with: the recorded stack's (`chosen` first, the one its move was
+/// confirmed with) when its files are there, since a project moved to another language can still
+/// hold the old one's manifest (#1837); else the first found.
+pub fn toolchain_for(stack: &str, chosen: Option<&str>, app: &std::path::Path) -> Option<&'static Toolchain> {
+    own_toolchain(stack, chosen, app).or_else(|| toolchain_in(app))
 }
 
 /// Each language's files in `app` ([`Toolchain::marker_files`]) with their size and time, to tell
@@ -207,8 +210,9 @@ pub fn language_files(app: &std::path::Path) -> LanguageFiles {
 /// deleted file or an old `main.py` left as it was isn't a move), with its own dependencies when
 /// it has some (a package.json for Next.js isn't Electron), and it is written in another language
 /// than `stack`. Within one language (a Vite site that mentions Electron) the recorded stack
-/// stays. A folder too big to read whole can't show a move.
-pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path, before: &LanguageFiles) -> Option<&'static str> {
+/// stays. A folder too big to read whole can't show a move. Returns the stack and the toolchain
+/// the turn wrote, to check the build with.
+pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path, before: &LanguageFiles) -> Option<(&'static str, &'static str)> {
     let now = language_files(app);
     let files = |all: &LanguageFiles, name: &str| all.iter().find(|(n, _)| *n == name).map_or(Some(Vec::new()), |(_, f)| f.clone());
     let wrote = |t: &&Toolchain| match (files(&now, &t.name), files(before, &t.name)) {
@@ -229,7 +233,7 @@ pub fn moved_to(stack: &str, asked: &'static str, app: &std::path::Path, before:
             return None;
         }
     }
-    (!get(stack).is_some_and(|s| s.toolchains.contains(&new.name))).then_some(asked)
+    (!get(stack).is_some_and(|s| s.toolchains.contains(&new.name))).then_some((asked, new.name.as_str()))
 }
 
 /// The stack a folder of the person's own files is built with: an engine's project file says
@@ -387,14 +391,14 @@ mod tests {
     #[test]
     fn a_build_moved_to_another_language_is_checked_in_the_new_one() {
         let d = tempfile::tempdir().unwrap();
-        let tool = |stack: &str| toolchain_for(stack, d.path()).map(|t| t.name.as_str());
+        let tool = |stack: &str| toolchain_for(stack, None, d.path()).map(|t| t.name.as_str());
         std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
         assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()), None, "no Python files yet: the build hasn't moved");
         std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"game\"\n").unwrap();
         assert_eq!(tool("Rust + macroquad"), Some("Rust"));
         assert_eq!(tool("Python"), Some("Python"), "not the Cargo.toml left behind");
         assert_eq!(tool("Unity"), Some("Rust"), "a stack with no toolchain takes the first found, as before");
-        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()), Some("Python"));
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()).map(|m| m.0), Some("Python"));
         assert_eq!(moved_to("Python", "Python", d.path(), &Vec::new()), None, "already recorded");
         // Electron's own dependency is there, so only the language guard can keep the stack.
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"electron": "39"}}"#).unwrap();
@@ -420,8 +424,8 @@ mod tests {
             assert_eq!(asked, Some(stack), "{request}");
             assert_eq!(moved_to("Rust + macroquad", stack, d.path(), &Vec::new()), None, "{stack}: nothing of it yet");
             std::fs::write(d.path().join(file), "").unwrap();
-            assert_eq!(moved_to("Rust + macroquad", stack, d.path(), &Vec::new()), Some(stack), "{file}");
-            assert_eq!(toolchain_for(stack, d.path()).map(|t| t.name.as_str()), Some(tool), "{file}: not the Cargo.toml left behind");
+            assert_eq!(moved_to("Rust + macroquad", stack, d.path(), &Vec::new()).map(|m| m.0), Some(stack), "{file}");
+            assert_eq!(toolchain_for(stack, None, d.path()).map(|t| t.name.as_str()), Some(tool), "{file}: not the Cargo.toml left behind");
         }
         assert_eq!(asked_for(&words("sign in, go to settings")), None, "the verb \"go\" isn't Go");
         assert_eq!(asked_for(&words("written in javascript")).map(|s| s.name.as_str()), Some("React + TypeScript (Vite)"), "JavaScript isn't Java");
@@ -477,10 +481,10 @@ mod tests {
         let before = language_files(d.path());
         assert_eq!(moved_to("Go", "Python", d.path(), &before), None, "an old main.py the turn didn't touch");
         std::fs::write(d.path().join("main.py"), "print('rewritten')\n").unwrap();
-        assert_eq!(moved_to("Go", "Python", d.path(), &before), Some("Python"), "rewritten");
+        assert_eq!(moved_to("Go", "Python", d.path(), &before).map(|m| m.0), Some("Python"), "rewritten");
         let before = language_files(d.path());
         std::fs::write(d.path().join("pyproject.toml"), "[project]\nname = \"app\"\n").unwrap();
-        assert_eq!(moved_to("Go", "Python", d.path(), &before), Some("Python"), "a new manifest");
+        assert_eq!(moved_to("Go", "Python", d.path(), &before).map(|m| m.0), Some("Python"), "a new manifest");
     }
 
     /// Review of #2099: a port names its source too, and the destination is what's asked for.
@@ -512,7 +516,7 @@ mod tests {
         let before = language_files(d.path());
         assert_eq!(moved_to("Rust + macroquad", "C# (.NET)", d.path(), &before), None, "untouched");
         std::fs::write(d.path().join("Tools.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>").unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "C# (.NET)", d.path(), &before), Some("C# (.NET)"));
+        assert_eq!(moved_to("Rust + macroquad", "C# (.NET)", d.path(), &before).map(|m| m.0), Some("C# (.NET)"));
 
         // A Bevy port that keeps an existing Cargo.toml shows in its code.
         let d = tempfile::tempdir().unwrap();
@@ -523,7 +527,7 @@ mod tests {
         let before = language_files(d.path());
         assert_eq!(moved_to("Electron", "Bevy", d.path(), &before), None, "an untouched Cargo project beside the app");
         std::fs::write(d.path().join("src/main.rs"), "fn main() { /* bevy */ }\n").unwrap();
-        assert_eq!(moved_to("Electron", "Bevy", d.path(), &before), Some("Bevy"));
+        assert_eq!(moved_to("Electron", "Bevy", d.path(), &before).map(|m| m.0), Some("Bevy"));
 
         // A Java port that adds Gradle beside an old pom.xml is checked with Gradle.
         let d = tempfile::tempdir().unwrap();
@@ -534,8 +538,14 @@ mod tests {
         std::fs::File::options().write(true).open(&pom).unwrap().set_modified(old).unwrap();
         let before = language_files(d.path());
         std::fs::write(d.path().join("build.gradle.kts"), "plugins { java }\n").unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Java", d.path(), &before), Some("Java"));
-        assert_eq!(toolchain_for("Java", d.path()).map(|t| t.name.as_str()), Some("Gradle"), "not the old pom.xml");
+        assert_eq!(moved_to("Rust + macroquad", "Java", d.path(), &before), Some(("Java", "Gradle")));
+        assert_eq!(toolchain_for("Java", None, d.path()).map(|t| t.name.as_str()), Some("Gradle"), "not the old pom.xml");
+        // With equal times only the toolchain the move recorded tells them apart.
+        let gradle = d.path().join("build.gradle.kts");
+        std::fs::File::options().write(true).open(&gradle).unwrap().set_modified(old).unwrap();
+        assert_eq!(toolchain_for("Java", None, d.path()).map(|t| t.name.as_str()), Some("Maven"), "a tie falls back to the table's order");
+        assert_eq!(toolchain_for("Java", Some("Gradle"), d.path()).map(|t| t.name.as_str()), Some("Gradle"), "the recorded one wins");
+        assert_eq!(toolchain_for("Rust + macroquad", Some("Gradle"), d.path()).map(|t| t.name.as_str()), Some("Rust"), "not another stack's");
     }
 
     /// Review of #2099: what shows a move, and what mustn't undo one.
@@ -545,18 +555,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"game\"\n").unwrap();
         std::fs::write(d.path().join("main.py"), "print(1)\n").unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()), Some("Python"));
-        assert_eq!(toolchain_for("Python", d.path()).map(|t| t.name.as_str()), Some("Python"));
+        assert_eq!(moved_to("Rust + macroquad", "Python", d.path(), &Vec::new()).map(|m| m.0), Some("Python"));
+        assert_eq!(toolchain_for("Python", None, d.path()).map(|t| t.name.as_str()), Some("Python"));
         // A package.json for Next.js is no move to Electron; one that lists electron is.
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"next": "16"}}"#).unwrap();
         assert_eq!(moved_to("Rust + macroquad", "Electron", d.path(), &Vec::new()), None);
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"electron": "39"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path(), &Vec::new()), Some("Electron"));
+        assert_eq!(moved_to("Rust + macroquad", "Electron", d.path(), &Vec::new()).map(|m| m.0), Some("Electron"));
         // React needs React as well as Vite: a Vue app built with Vite isn't one.
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"vue": "3"}, "devDependencies": {"vite": "7"}}"#).unwrap();
         assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path(), &Vec::new()), None);
         std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"react": "19"}, "devDependencies": {"vite": "7"}}"#).unwrap();
-        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path(), &Vec::new()), Some("React + TypeScript (Vite)"));
+        assert_eq!(moved_to("Rust + macroquad", "React + TypeScript (Vite)", d.path(), &Vec::new()).map(|m| m.0), Some("React + TypeScript (Vite)"));
         // Only the new language's own file counts: a Cargo key named phaser isn't npm's Phaser.
         let cargo = tempfile::tempdir().unwrap();
         std::fs::write(cargo.path().join("Cargo.toml"), "[dependencies]\nphaser = \"1\"\n").unwrap();
@@ -566,7 +576,7 @@ mod tests {
         let bevy = tempfile::tempdir().unwrap();
         std::fs::write(bevy.path().join("package.json"), r#"{"dependencies": {"electron": "39"}}"#).unwrap();
         std::fs::write(bevy.path().join("Cargo.toml"), "[dependencies]\nengine = { package = \"bevy\", version = \"0.17\" }\n").unwrap();
-        assert_eq!(moved_to("Electron", "Bevy", bevy.path(), &Vec::new()), Some("Bevy"));
+        assert_eq!(moved_to("Electron", "Bevy", bevy.path(), &Vec::new()).map(|m| m.0), Some("Bevy"));
         // A Python build keeps its stack beside an old Vite package.json; a Vite one doesn't hold.
         std::fs::write(d.path().join("package.json"), r#"{"devDependencies": {"vite": "7"}}"#).unwrap();
         assert!(holds_its_language("Python", d.path()));
@@ -578,7 +588,7 @@ mod tests {
         for i in 0..300 {
             std::fs::write(big.path().join(format!("asset{i}.txt")), "").unwrap();
         }
-        assert_eq!(toolchain_for("C# (.NET)", big.path()).map(|t| t.name.as_str()), Some(".NET"));
+        assert_eq!(toolchain_for("C# (.NET)", None, big.path()).map(|t| t.name.as_str()), Some(".NET"));
     }
 
     #[test]

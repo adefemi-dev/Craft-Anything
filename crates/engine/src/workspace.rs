@@ -402,6 +402,10 @@ pub struct Manifest {
     /// The stack chosen for the build ("React + TypeScript (Vite)", "Rust + Bevy"…).
     #[serde(default)]
     pub stack: String,
+    /// The toolchain a move to `stack` was confirmed with ("Gradle", for a Java port that wrote
+    /// build.gradle.kts beside an old pom.xml), when the stack has more than one; none: not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<String>,
     #[serde(default)]
     pub status: Status,
     /// One line on what's happening or what went wrong.
@@ -503,6 +507,7 @@ impl Manifest {
             checks: Vec::new(),
             agent_session: None,
             agent_session_by: None,
+            toolchain: None,
             agent_session_deep: None,
             capture_deep: None,
             allowed_actions: Vec::new(),

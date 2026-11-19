@@ -298,7 +298,7 @@ impl RebuildRun {
                 if !continuing && !ws.capture_dir().exists() {
                     let _ = std::fs::remove_file(ws.transcript_path());
                 }
-                Some(hub.start_builder(&entry, opts.beginner, Some(ws.transcript_path()), run_deep)?)
+                Some(hub.start_builder(&entry, opts.beginner, Some(ws.transcript_path()), run_deep, Some(notes::notes_dir(&ws.inbox_dir())))?)
             }
         };
         // A chosen extractor (an API backend, e.g. Kimi K3) takes a game's files out after a fresh

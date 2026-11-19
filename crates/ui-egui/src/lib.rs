@@ -1132,7 +1132,8 @@ impl CraftApp {
             }
             // "Stop waiting" before the window was up (or while another tool held the session).
             (SIGN_IN_TOOL, Err(e)) if e.code == ErrorCode::Cancelled => {
-                self.toast(format!("{}: {}", make::site_name(params), tr("Stopped the sign-in.")), false)
+                let stopped = tr("Stopped the sign-in.");
+                self.toast(format!("{}: {stopped}", make::site_name(params)), false)
             }
             (SIGN_IN_TOOL, Err(e)) if !clean_room::is_refusal(&e) => {
                 let failed = tr("Couldn't sign in to the site.");

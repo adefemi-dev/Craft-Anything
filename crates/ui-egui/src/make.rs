@@ -7,6 +7,7 @@ use crate::state::{MakeDraft, Screen};
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Pick, icons, widgets};
 use craft_anything_engine::Mode;
+use craft_anything_engine::tools::web_common;
 use craft_anything_engine::workspace::{ExistingFiles, Status, TargetRef};
 use egui::{RichText, Sense, Ui, Vec2};
 
@@ -463,11 +464,13 @@ pub fn sign_in_words(result: &serde_json::Value) -> (String, bool) {
     }
 }
 
-/// The site a `web_site_sign_in` call was for, as the person typed it (without `https://`).
-pub fn site_name(params: &serde_json::Value) -> &str {
-    let url = params["url"].as_str().unwrap_or_default();
+/// The site a `web_site_sign_in` call was for, as the person typed it (without `https://`), less
+/// any credentials, query or fragment: it's shown in a toast.
+pub fn site_name(params: &serde_json::Value) -> String {
+    let url = web_common::sanitize_url(params["url"].as_str().unwrap_or_default());
+    let url = url.split(['?', '#']).next().unwrap_or_default();
     let host = url.split_once("://").map_or(url, |(_, rest)| rest);
-    host.strip_suffix('/').unwrap_or(host)
+    host.strip_suffix('/').unwrap_or(host).to_string()
 }
 
 /// Clean room or Deep for what is recreated: the title bar's switch, as a plain choice.
@@ -696,6 +699,10 @@ mod tests {
         assert_eq!(site_name(&json!({"url": "https://example.com/"})), "example.com");
         assert_eq!(site_name(&json!({"url": "http://example.com:8080/app"})), "example.com:8080/app");
         assert_eq!(site_name(&json!({})), "");
+        // A toast never shows credentials, a query or a fragment.
+        assert_eq!(site_name(&json!({"url": "https://alice:pw@example.com/app?token=abc#k"})), "example.com/app");
+        assert_eq!(site_name(&json!({"url": "https://example.com/?token=abc"})), "example.com");
+        assert_eq!(site_name(&json!({"url": "https://example.com/@profile"})), "example.com/@profile");
     }
 
     #[test]

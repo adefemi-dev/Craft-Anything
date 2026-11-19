@@ -135,7 +135,8 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
 
 fn row(ui: &mut Ui, title: &str, sub: &str, add: impl FnOnce(&mut Ui)) {
     let t = Tokens::get(ui.ctx());
-    ui.horizontal(|ui| {
+    // Wrapped: a control wider than the room beside the label goes under it.
+    ui.horizontal_wrapped(|ui| {
         ui.vertical(|ui| {
             // Half a narrow page, so the control beside it still fits.
             ui.set_width((ui.available_width() / 2.0).min(280.0));
@@ -1006,11 +1007,18 @@ pub(crate) fn server_form(app: &mut CraftApp, ui: &mut Ui) {
         let r = ui.add(egui::TextEdit::singleline(text).password(secret).hint_text(tr(hint)).desired_width(width).frame(widgets::text_field_frame_compact(&t)));
         widgets::named(r, &tr(name));
     };
-    ui.horizontal(|ui| {
+    let mut fields = |ui: &mut Ui| {
         field(ui, &mut form.name, "name, e.g. Studio box", 150.0, "AI name", false);
-        let w = ui.available_width() - FRAME;
+        let w = (ui.available_width() - FRAME).max(120.0);
         field(ui, &mut form.address, "address, e.g. http://192.168.1.20:11434/v1", w, "Server address", false);
-    });
+    };
+    // Side by side when both fit; otherwise the address gets a line of its own (2× zoom), since a
+    // text field shrinks to the room left and the name alone can fill the row.
+    if ui.available_width() >= 150.0 + 120.0 + 2.0 * FRAME + ui.spacing().item_spacing.x {
+        ui.horizontal(fields);
+    } else {
+        fields(ui);
+    }
     // A model picked from one server's list goes once the address is another, before Add can send
     // it there (a model the server hasn't got may start a download). One typed by hand stays.
     if let Some((from, picked)) = form.picked.take() {

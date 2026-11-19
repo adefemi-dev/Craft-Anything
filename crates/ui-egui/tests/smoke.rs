@@ -3749,12 +3749,29 @@ fn settings_fits_the_smallest_window_at_double_zoom() {
     assert!(inside(about), "About at {about:?} isn't reached in the {screen:?} window");
     h.get_by_label("About").click();
     h.run_steps(3);
-    assert_eq!(h.state().state.settings_tab, craft_anything_ui_egui::state::SettingsTab::About);
-    // At 1× in the same window no tab's page needs to scroll sideways.
+    use craft_anything_ui_egui::state::SettingsTab;
+    assert_eq!(h.state().state.settings_tab, SettingsTab::About);
+    // The AI tab's server address keeps room to type in, though the name fills the row.
+    h.state_mut().state.settings_tab = SettingsTab::Ai;
+    h.run_steps(3);
+    let (name, address) = (h.get_by_label("AI name").rect(), h.get_by_label("Server address").rect());
+    assert!(address.top() >= name.bottom() && address.width() >= name.width() - 1.0, "address {address:?} beside name {name:?}");
+    // At 1× in the same window no tab's page needs to scroll sideways. The zoom applies on the
+    // next pass, so lay it out before clicking, and check each click landed.
     h.ctx.set_zoom_factor(1.0);
-    for tab in ["General", "Engines", "AI", "Builds", "Plugins", "Safety", "About"] {
+    h.run_steps(3);
+    for (tab, id) in [
+        ("General", SettingsTab::General),
+        ("Engines", SettingsTab::Engines),
+        ("AI", SettingsTab::Ai),
+        ("Builds", SettingsTab::Builds),
+        ("Plugins", SettingsTab::Plugins),
+        ("Safety", SettingsTab::Safety),
+        ("About", SettingsTab::About),
+    ] {
         h.get_by_label(tab).click();
         h.run_steps(3);
+        assert_eq!(h.state().state.settings_tab, id, "the click on {tab} landed");
         let sideways = h.query_all_by_role(egui::accesskit::Role::ScrollBar).map(|n| n.rect()).find(|r| r.width() > r.height());
         assert!(sideways.is_none(), "{tab} scrolls sideways at {sideways:?}");
     }

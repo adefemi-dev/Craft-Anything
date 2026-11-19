@@ -1,10 +1,28 @@
 # Status
 
 What works today and how it was checked. The plan, owners and order of work are in
-[ROADMAP.md](ROADMAP.md). Last updated 2026-11-14. The baseline audit on 2026-10-23 from `main` had 923 tests passing;
+[ROADMAP.md](ROADMAP.md). Last updated 2026-11-20. The baseline audit on 2026-10-23 from `main` had 923 tests passing;
 workspace clippy, layers, fmt and the secret scan of all history were clean. Chinese UI checks are listed separately below.
 
 ## What works, and how it was checked
+
+### SP reader coverage inventory (R3.14)
+
+[SP_READ_COVERAGE.md](SP_READ_COVERAGE.md) audits the committed reader baseline and
+all 48 directory entries in two retained project copies. Six streams are retained by
+the metadata path, four more are processed by full geometry/texture import, and two
+have narrowly guarded authoring readers. The other 36 lack a structured SP decoder
+in the audited source; even the first twelve have partial or unresolved fields.
+These route counts are not a percentage of semantic completeness.
+
+Read-only probes with the identified delivered CLI returned 241 tasks/79 resources
+and 2 tasks/2 resources, with consistent retained lookup vectors; full-reader probes
+returned 33,513 and 36,929 mesh instances. Independent container checks validated
+20 M/G zlib streams and preserved both source hashes. Native units, axes and row
+identity remain unverified by these probes. No new native UI comparison or writer
+round trip was performed. Skipped normals, count-only geometry user values and
+nonbinding resource GUID lists are explicit extraction gaps. The reader-first
+backlog separates decoding, meaning, references, evaluation and comparison coverage.
 
 ### Declared signed relationship preview (R3.14)
 

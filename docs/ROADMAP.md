@@ -2467,7 +2467,16 @@ Owner: open · Status: in progress
 ### R3.14 Read-only project and scene viewer
 <!-- Explicit user-requested interface follow-up, 2026-11-12. -->
 Owner: open · Status: in progress (experimental 3D/4D/5D available; parity expansion remains open)
-- [ ] Inventory all observed SP sections, distinguish decoded storage from semantic/evaluator/native coverage, and publish a source-bound reader-first decoder backlog before expanding authoring. -- claimed: Codex, branch `docs/r3.14-sp-read-coverage`
+- [x] Inventory all observed SP sections, distinguish decoded storage from semantic/evaluator/native coverage, and publish a source-bound reader-first decoder backlog before expanding authoring. -- claimed: Codex, branch `docs/r3.14-sp-read-coverage`
+      See [SP read coverage](SP_READ_COVERAGE.md): 48 observed sections in two source-bound inputs; inventory completion does not establish full semantic reading.
+      - [ ] R0: Implement route-aware section/field coverage and unknown-range provenance shared by metadata and full readers.
+      - [ ] R1: Inventory source-bound task/resource/profile families and separate raw decode status from Strict/effects evaluation refusals on identical inputs.
+      - [ ] R2: Retain skipped geometry normals/user values, nonbinding resource GUID-list entries and remaining opaque spans in consumer-visible extraction.
+      - [ ] R3: Complete supported state/time/calendar/constraint reading with populated independent controls before general 4D admission.
+      - [ ] R4: Complete supported units/currency/rates/expense-reference reading before general 5D admission.
+      - [ ] R5: Decode remaining project/catalog/external-reference families using nonempty controls and explicit dependency inventories.
+      - [ ] R6: Complete remaining geometry/material/image families and reconcile external scenes by identity rather than aggregate counts.
+      - [ ] R7: Publish a versioned corpus and hostile-input matrix before claiming complete reading within a declared scope.
 - [x] Add an identity/appearance evidence audit and revalidate retained controlled cases; preserve unverified native ID and material semantics. -- claimed: Codex, branch `feature/r3.14-scene-bundle-viewport`
 - [x] Finish the V2 baseline validation and retain the delivered planning interface in a reviewable commit. -- claimed: Codex, branch `feature/r3.14-scene-bundle-viewport`
 - [x] Add an interactive orientation cube and persistent scene-bound saved viewpoints through headless tools. -- claimed: Codex, branch `feature/r3.14-scene-bundle-viewport`

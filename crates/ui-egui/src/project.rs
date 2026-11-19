@@ -118,7 +118,7 @@ impl CraftApp {
             rebuild::project::apply_new_project_fields(&mut ws, attached, stack, budget, generate, draft.ai.as_deref()).map_err(|e| e.for_people())?;
             // The run finds the stack already set, so the skip is recorded here, as the run would.
             if let Some(s) = skipped.filter(|_| !attached) {
-                s.journal(&ws);
+                s.journal(&ws).map_err(|e| e.for_people())?;
             }
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);
             Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached })

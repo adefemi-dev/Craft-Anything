@@ -684,10 +684,9 @@ impl Worker {
         session.ext.insert(Arc::new(keys));
     }
 
-    /// Point the engine at this workspace: its investigation project and inbox.
+    /// Point the engine at this workspace: its investigation project ([`project::investigation`]) and inbox.
     fn attach(&self, ws: &Workspace) -> Result<(), ToolError> {
-        let dir = ws.investigation_dir();
-        let project = Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))?;
+        let project = project::investigation(ws)?;
         let mut s = self.engine.session();
         s.open_project(project)?;
         s.ext.insert(Arc::new(InboxDir(ws.inbox_dir())));
@@ -867,7 +866,7 @@ impl Worker {
             if let Some(s) = skipped {
                 // A step line, so the CLI prints it and the feed keeps it where the stop used to be.
                 self.emit(RunEvent::Step { step: Step::Study, text: s.notice() });
-                s.journal(ws);
+                s.journal(ws)?;
             }
         }
         let kind = opts.kinds.detect(&ws.manifest.request, &ws.manifest.target, &ws.manifest.stack).ok_or_else(no_kind)?;

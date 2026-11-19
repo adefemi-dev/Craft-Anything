@@ -60,10 +60,20 @@ impl EngineSkipped {
     /// Records the skip in `ws`'s journal (in its investigation, where the run's own entries go). The
     /// run does this when it picks the stack, and the app does it when Make's Start creates the
     /// project with Builder's choice.
-    pub fn journal(&self, ws: &Workspace) {
+    /// The investigation is opened, or made as the run makes it, first: the run can't make it in a
+    /// folder that already holds a journal.
+    pub fn journal(&self, ws: &Workspace) -> Result<(), ToolError> {
+        let project = investigation(ws)?;
         let entry = json!({"action": "engine_skipped", "engine": self.engine.name(), "named": self.named, "stack": stacks::BUILDERS_CHOICE});
-        craft_anything_engine::journal::append(&ws.investigation_dir(), "stack", entry);
+        craft_anything_engine::journal::append(&project.root, "stack", entry);
+        Ok(())
     }
+}
+
+/// `ws`'s investigation project (its evidence and journal), made the first time it is needed.
+pub fn investigation(ws: &Workspace) -> Result<Project, ToolError> {
+    let dir = ws.investigation_dir();
+    Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))
 }
 
 /// Whether a new game whose stack would be its kind's default `engine`

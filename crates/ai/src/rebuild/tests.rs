@@ -1980,6 +1980,38 @@ mod picking_up_a_build {
         Some((said, Workspace::open(&ws.root).unwrap().manifest.stack))
     }
 
+    /// The app records the skip when Make creates the project, before any run: the run still opens
+    /// that investigation afterwards (it can't make one in a folder already holding a journal) and
+    /// doesn't record the skip again, since the stack is set.
+    #[test]
+    fn a_skip_journaled_before_the_run_leaves_the_run_its_investigation() {
+        let b = bench();
+        let mut ws = Workspace::create(&b.projects, "g", "Make a space shooter game using Three.js", TargetRef::None).unwrap();
+        ws.manifest.stack = stacks::BUILDERS_CHOICE.into();
+        ws.save().unwrap();
+        project::EngineSkipped { engine: game::Builder::Unity, named: "Three.js" }.journal(&ws).unwrap();
+        let opts = RunOptions { backend: Some("Stand-in".into()), ..RunOptions::default() };
+        let run = RebuildRun::start(&b.hub, Workspace::open(&ws.root).unwrap(), opts).unwrap();
+        // The first step or the end: a run that can't open its investigation ends at once.
+        let first = loop {
+            match run.rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(RunEvent::Step { text, .. }) => break Ok(text),
+                Ok(RunEvent::Finished { message, .. }) => break Err(message),
+                Ok(_) => {}
+                Err(e) => panic!("the run went away: {e}"),
+            }
+        };
+        run.stop();
+        while !matches!(run.rx.recv_timeout(Duration::from_secs(30)), Ok(RunEvent::Finished { .. }) | Err(_)) {}
+        assert!(first.is_ok(), "the run stopped: {first:?}");
+        let journal = std::fs::read_dir(ws.investigation_dir().join("journal"))
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect::<String>();
+        assert_eq!(journal.matches(r#""action":"engine_skipped""#).count(), 1, "{journal}");
+    }
+
     #[test]
     fn a_game_naming_a_listed_technology_starts_without_the_missing_engine() {
         let b = bench();

@@ -1416,10 +1416,12 @@ pub fn answer(standin: &StandIn, turns: &mut Turns, method: &str, path: &str, qu
     if fit.is_empty() {
         return Answer::NoMatch(NoMatch { reason: NoMatchReason::CachedBodyUnavailable, nearest: nearest(standin, look_for, &clean_path) });
     }
+    // On a timeline a lone answer takes no turn, so a set that starts with it later starts at the
+    // beginning; without positions every answer takes one, as before positions were recorded.
+    let timed = fit.iter().all(|i| route.samples.get(*i).is_some_and(|s| s.order.is_some()));
     let (fit, stepping) = on_timeline(standin, ri, route, fit, turns, write, key);
-    // A lone answer takes no turn, so a set that starts with it later starts at the beginning.
     let at = match fit.first() {
-        Some(first) if fit.len() > 1 => {
+        Some(first) if fit.len() > 1 || !timed => {
             let counter = turns.turns.entry((ri, *first, how)).or_insert(0);
             let at = counter.checked_rem(fit.len()).unwrap_or(0);
             *counter = counter.saturating_add(1);

@@ -836,6 +836,20 @@ fn a_file_without_positions_replays_as_before() {
 }
 
 #[test]
+fn a_file_without_positions_counts_a_lone_answer_as_a_turn() {
+    let v = json!({"version": 1, "routes": [
+        {"method": "POST", "template": "/search", "samples": [
+            {"path": "/search", "status": 200, "text": "by q", "request_key": "keys:q"},
+            {"path": "/search", "status": 200, "text": "by tag", "request_key": "keys:tag"},
+        ]},
+    ]});
+    let s: StandIn = serde_json::from_value(v).unwrap();
+    let mut t = Turns::default();
+    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"q":"a"}"#))), "by q");
+    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"other":1}"#))), "by tag", "the old replay: the first answer took its turn");
+}
+
+#[test]
 fn hostile_positions_cannot_crash_or_loop() {
     let v = json!({"version": 2, "routes": [
         {"method": "GET", "template": "/a", "samples": [

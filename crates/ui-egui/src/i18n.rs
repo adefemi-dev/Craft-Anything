@@ -113,11 +113,18 @@ pub fn language() -> String {
     current().read().map(|g| g.0.clone()).unwrap_or_else(|_| "en".into())
 }
 
-/// Whether `code` names a right-to-left language (accepting legacy `iw` tags as Hebrew).
+/// Whether `code` names a right-to-left script or language (accepting legacy `iw` tags as Hebrew
+/// and honoring explicit ISO 15924 script subtags before language defaults).
 pub fn is_rtl_code(code: &str) -> bool {
     let tag = code.trim().split(['.', '@']).next().unwrap_or_default().replace('_', "-").to_ascii_lowercase();
-    let base = tag.split('-').next().unwrap_or("");
-    matches!(base, "ar" | "dv" | "fa" | "he" | "iw" | "ku" | "ps" | "sd" | "ug" | "ur" | "yi")
+    let mut parts = tag.split('-');
+    let base = parts.next().unwrap_or("");
+    for subtag in parts {
+        if subtag.len() == 4 && subtag.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return matches!(subtag, "arab" | "hebr" | "nkoo" | "rohg" | "syrc" | "thaa" | "yezi");
+        }
+    }
+    matches!(base, "ar" | "ckb" | "dv" | "fa" | "he" | "iw" | "ps" | "sd" | "ug" | "ur" | "yi")
 }
 
 /// Whether the active UI language uses right-to-left script direction.
@@ -189,6 +196,12 @@ mod tests {
         assert!(is_rtl_code("he"));
         assert!(is_rtl_code("iw"));
         assert!(is_rtl_code("iw-IL"));
+        assert!(is_rtl_code("he-Hebr-IL"));
+        assert!(is_rtl_code("ckb"));
+        assert!(is_rtl_code("ku-Arab-IQ"));
+        assert!(!is_rtl_code("ku"));
+        assert!(!is_rtl_code("ku-Latn-TR"));
+        assert!(!is_rtl_code("sd-Deva-IN"));
         assert!(!is_rtl_code("en"));
         assert_eq!(preferred_language(["de-DE", "zh-HK"]), "de");
         assert_eq!(preferred_language(["sv-SE", "vi-VN", "en-US"]), "vi");

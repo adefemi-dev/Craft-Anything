@@ -459,4 +459,31 @@ mod tests {
         assert_eq!(session.targets().count(), 0, "returning to A doesn't reopen what was closed");
         assert_eq!(a.load_annotations(&target.sha256).unwrap().comments.get(&0x1000).map(String::as_str), Some("from A"));
     }
+
+    /// A project that can't be read doesn't open, so the current project and its target stay as
+    /// they were. A project whose unknowns folder is simply gone still opens, with none.
+    #[test]
+    fn an_unreadable_project_leaves_the_current_project_and_its_targets_alone() {
+        let dir = crate::testing::temp_dir();
+        let a = Project::create(&dir.join("a.cany"), "A", Purpose::Education).unwrap();
+        let b = Project::create(&dir.join("b.cany"), "B", Purpose::Education).unwrap();
+        let target = Target::from_bytes(dir.join("tool.bin"), "tool.bin".into(), b"\x7fELF\x02\x01".to_vec());
+        let mut session = crate::testing::session();
+        session.open_project(a.clone()).unwrap();
+        let id = session.add_target(target);
+
+        let Some(closed) = crate::tools::artifact_tools::walk_testing::close(&b.root.join("unknowns")) else { return };
+        let refused = session.open_project(b);
+        drop(closed);
+        assert!(refused.is_err(), "an unreadable unknowns folder fails the open");
+        assert_eq!(session.project.as_ref().map(|p| p.root.clone()), Some(a.root.clone()), "A is still open");
+        assert_eq!(session.targets().count(), 1, "A's target is still open");
+        assert_eq!(session.active_id(), Some(&id), "and still selected");
+
+        // A project whose unknowns folder is missing still opens, with no questions.
+        let c = Project::create(&dir.join("c.cany"), "C", Purpose::Education).unwrap();
+        std::fs::remove_dir_all(c.root.join("unknowns")).unwrap();
+        session.open_project(c).unwrap();
+        assert_eq!(session.unknowns().count(), 0);
+    }
 }

@@ -581,6 +581,8 @@ pub struct CraftApp {
     saving: Option<u64>,
     /// A new project being made (Start waits for it).
     pub creating: Option<u64>,
+    /// A website sign-in window open from Make (one at a time; Start waits for it).
+    pub signing_in: Option<u64>,
     /// Tools the UI started that wait for the person's consent, by the id on their card.
     pending_consent: std::collections::HashMap<u64, (String, Value, Route)>,
     next_consent: u64,
@@ -684,6 +686,7 @@ impl CraftApp {
             save_due: None,
             saving: None,
             creating: None,
+            signing_in: None,
             chat_jobs: Vec::new(),
             asking: Default::default(),
             pausing: Default::default(),
@@ -1054,6 +1057,15 @@ impl CraftApp {
         })
     }
 
+    /// Open a browser window on a website for the person to sign in to it themselves, so studies
+    /// of that site see it signed in (`web_site_sign_in`). One window at a time.
+    pub fn sign_in_to_site(&mut self, url: &str) {
+        if self.signing_in.is_none() {
+            let tool = craft_anything_engine::tools::site_sign_in::SIGN_IN_TOOL;
+            self.signing_in = Some(self.act(tool, json!({ "url": url }), tr("Sign in to a website")));
+        }
+    }
+
     fn acted(&mut self, job: u64, tool: &str, params: &Value, result: Result<Value, ToolError>) {
         match (tool, result) {
             ("project_preview", Ok(v)) => {
@@ -1111,6 +1123,15 @@ impl CraftApp {
                 } else {
                     self.toast(format!("{} {}", tr("Some plugins couldn't be read:"), failed.join("; ")), true);
                 }
+            }
+            ("web_site_sign_in", Ok(v)) => {
+                let (words, warn) = make::sign_in_words(&v);
+                self.toast(tr(words), warn);
+            }
+            // "Stop waiting" before the window was up (or while another tool held the session).
+            ("web_site_sign_in", Err(e)) if e.code == ErrorCode::Cancelled => self.toast(tr("Stopped the sign-in."), false),
+            ("web_site_sign_in", Err(e)) if !clean_room::is_refusal(&e) => {
+                self.toast(format!("{} {}", tr("Couldn't sign in to the site."), e.for_people()), true);
             }
             ("project_open_folder", Err(e)) => self.toast(format!("{} {}", tr("Couldn't open the folder."), e.message), true),
             (
@@ -1550,6 +1571,9 @@ impl CraftApp {
         }
         if self.creating == Some(job) {
             self.creating = None;
+        }
+        if self.signing_in == Some(job) {
+            self.signing_in = None;
         }
         // The form's own request: a newer Add replaces it, and an older answer is then stale.
         let form_request = self.server_form.connecting.as_ref().is_some_and(|(id, ..)| *id == job);

@@ -968,6 +968,70 @@ fn website_choice_stays_picked_while_the_address_is_empty() {
     assert!(h.query_by_label("Type the website's address:").is_none());
 }
 
+/// A website typed on Make can be signed in to from there (`web_site_sign_in`), one sign-in at a
+/// time, and Start waits until it's over.
+#[test]
+fn a_website_is_signed_in_to_from_make() {
+    let store = tempfile::tempdir().unwrap();
+    let store_dir = store.path().to_path_buf();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        // No browser here: only the path set (not there) and an empty engine store are looked at,
+        // so the sign-in fails at once, as on a computer without one, and no window opens. The
+        // app hands its settings to the session, so both get them.
+        let engines = &mut a.settings.engines;
+        engines.only_configured = true;
+        engines.store_dir = Some(store_dir);
+        engines.tools.chromium = Some("/nowhere/chromium".into());
+        a.engine.session().settings.engines = a.settings.engines.clone();
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("A website").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none(), "no address yet");
+    h.state_mut().state.make.url = "two words.com".into();
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none(), "not an address a sign-in can be saved for");
+    h.state_mut().state.make.url = "example.com".into();
+    h.state_mut().state.make.request = "Recreate this website".into();
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site").click();
+    h.run_steps(1);
+    assert!(h.state().signing_in.is_some(), "the sign-in started");
+    assert!(wait(&mut h, |a| a.signing_in.is_none()), "and ended");
+    assert!(
+        h.state().state.toasts.iter().any(|(t, err)| *err && t.starts_with("Couldn't sign in to the site.") && t.contains("chromium")),
+        "{:?}",
+        h.state().state.toasts
+    );
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site");
+
+    // While a sign-in window is open: no second one, a way to stop waiting, and Start waits.
+    h.state_mut().signing_in = Some(u64::MAX);
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none());
+    h.get_by_label("Stop waiting");
+    h.get_by_label("Start").click();
+    h.run_steps(2);
+    assert!(h.state().creating.is_none(), "nothing starts before the sign-in is over");
+    assert_eq!(h.state().state.screen, Screen::Home);
+    // Nor from the other ways a start is reached (a builder picked, an engine got).
+    h.state_mut().start_make();
+    h.run_steps(1);
+    assert!(h.state().creating.is_none());
+    assert!(h.state().state.toasts.iter().any(|(t, _)| t == "Finish signing in to the site first."), "{:?}", h.state().state.toasts);
+    // The way out stays while the address changes or another kind of original is picked.
+    h.state_mut().state.make.url.clear();
+    h.run_steps(2);
+    h.get_by_label("Stop waiting");
+    h.get_by_label("Nothing — start fresh").click();
+    h.run_steps(2);
+    h.get_by_label("Stop waiting");
+    assert!(h.query_by_label("Sign in to this site").is_none());
+}
+
 /// Make's Simple / Advanced switch changes the app's mode and keeps the screen and the draft (#1286).
 #[test]
 fn the_make_card_switches_simple_and_advanced_and_keeps_the_draft() {

@@ -1937,9 +1937,13 @@ Gaps found while using the app for real projects.
       guidance treats saved-profile use as unverified authentication, even without a password page.
       The interactive sign-in runs without holding the engine session lock; same-site profile
       operations fail fast while reserved, without blocking other sites or explicitly fresh opens.
-- [ ] A "Sign in to this site" button in the Make screen for website targets (`web_site_sign_in`
-      is reachable only as a tool, from the CLI, MCP or the agent, today)
+- [x] A "Sign in to this site" button in the Make screen for website targets: a typed address
+      offers it, it runs `web_site_sign_in` for that site (one window at a time, "Stop waiting"
+      cancels the wait), Start waits until it's over, and a message says what was kept. Not run
+      with a real browser window from the app
       — claimed: mansur-akhmadi, branch feature/r2.9-make-site-sign-in
+- [ ] Make doesn't say whether a sign-in is already saved for the typed site, nor offer to forget
+      it (`web_site_sign_out`); an address found only in the request has no sign-in button
 - [ ] Study with the person's own already-running browser through its debugging endpoint, as an
       alternative to a saved sign-in
 - [ ] Sign in once with `web_site_sign_in` on a real site behind a login (and with the Ubuntu

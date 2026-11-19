@@ -158,10 +158,14 @@ pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
         ui.horizontal(|ui| {
             crate::builders::built_by(app, ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let ready = !app.state.make.request.trim().is_empty() && url_problem(&app.state.make.url).is_none() && app.creating.is_none();
+                let ready = !app.state.make.request.trim().is_empty()
+                    && url_problem(&app.state.make.url).is_none()
+                    && app.creating.is_none()
+                    && app.signing_in.is_none();
                 let start =
                     ui.add(widgets::Button::new(widgets::ButtonKind::Primary, "Start").icon(Some("sparkles")).size(theme::ControlSize::Hero).enabled(ready));
-                let start = if ready { start } else { start.on_disabled_hover_text(tr("Say what you want first.")) };
+                let wait = if app.signing_in.is_some() { "Finish signing in to the site first." } else { "Say what you want first." };
+                let start = if ready { start } else { start.on_disabled_hover_text(tr(wait)) };
                 if (start.clicked() || submit) && ready {
                     app.start_make();
                 }
@@ -409,6 +413,49 @@ fn choose_target(app: &mut CraftApp, ui: &mut Ui) {
             });
         }
     }
+    let m = &app.state.make;
+    let url = (website && !m.url.trim().is_empty() && url_problem(&m.url).is_none()).then(|| normalize_url(&m.url));
+    // A window already open stays in view (with its way out) whatever is picked meanwhile.
+    if url.is_some() || app.signing_in.is_some() {
+        sign_in(app, ui, url.as_deref());
+    }
+}
+
+/// A site that shows more to someone signed in: the person signs in to it in a browser window
+/// of its own, and studies of the site then see what they see (`web_site_sign_in`).
+fn sign_in(app: &mut CraftApp, ui: &mut Ui, url: Option<&str>) {
+    let t = Tokens::get(ui.ctx());
+    ui.add_space(theme::space::SM);
+    ui.horizontal_wrapped(|ui| {
+        icons::show(ui, "key-round", theme::icon::MD, t.icon);
+        if let Some(job) = app.signing_in {
+            ui.label(RichText::new(tr("Sign in in the browser window that opened, then close it.")).size(theme::SMALL).color(t.text_dim));
+            if widgets::link(ui, "Stop waiting").clicked() {
+                app.jobs.cancel(job);
+            }
+        } else if let Some(url) = url {
+            ui.label(RichText::new(tr("Does the site show more once you're signed in?")).size(theme::SMALL).color(t.text_dim));
+            let hint = "A browser window opens: sign in there yourself, then close it. Craft Anything never sees your password. The sign-in is kept on this computer and used when this site is studied.";
+            if widgets::secondary(ui, None, "Sign in to this site").on_hover_text(tr(hint)).clicked() {
+                app.sign_in_to_site(url);
+            }
+        }
+    });
+}
+
+/// What to tell the person once a sign-in window has closed, from `web_site_sign_in`'s result,
+/// and whether it's a warning.
+pub fn sign_in_words(result: &serde_json::Value) -> (&'static str, bool) {
+    let check = &result["check"];
+    match result["ended"].as_str() {
+        Some("timed_out") => ("The sign-in window was open too long, so it was closed. What it had saved is kept.", true),
+        Some("cancelled") => ("Stopped waiting for the sign-in window. What it had saved is kept.", false),
+        _ if check["sign_in_page"].as_bool() == Some(true) => {
+            ("Your sign-in was saved, but the site still asks you to sign in. Sign in again and choose \"remember me\" if the site offers it.", true)
+        }
+        _ if check["done"].as_bool() != Some(true) => ("Your sign-in was saved, but opening the site again to check it didn't work.", true),
+        _ => ("Signed in. Studies of this site now see it as you do.", false),
+    }
 }
 
 /// Clean room or Deep for what is recreated: the title bar's switch, as a plain choice.
@@ -610,6 +657,24 @@ mod tests {
         assert!(is_game(&kinds, &own(None, "Fix my game")), "nothing read from the folder: the words decide");
         let start_from = MakeDraft { existing: Some(ExistingFiles::StartFrom), ..own(Some("Python"), "Fix my game") };
         assert!(is_game(&kinds, &start_from), "material to start from doesn't decide");
+    }
+
+    #[test]
+    fn a_closed_sign_in_window_says_what_was_kept() {
+        use serde_json::json;
+        let checked = |sign_in_page: bool| json!({"done": true, "sign_in_page": sign_in_page, "error": null});
+        let words = |ended: &str, check: serde_json::Value| sign_in_words(&json!({"saved": true, "ended": ended, "check": check}));
+        assert_eq!(words("closed", checked(false)), ("Signed in. Studies of this site now see it as you do.", false));
+        let (still_asks, warn) = words("closed", checked(true));
+        assert!(warn && still_asks.contains("still asks you to sign in"), "{still_asks}");
+        let (unchecked, warn) = words("closed", json!({"done": false, "sign_in_page": null, "error": "the browser closed"}));
+        assert!(warn && unchecked.contains("didn't work"), "{unchecked}");
+        let (late, warn) = words("timed_out", checked(false));
+        assert!(warn && late.contains("open too long"), "{late}");
+        let (stopped, warn) = words("cancelled", checked(false));
+        assert!(!warn && stopped.starts_with("Stopped waiting"), "{stopped}");
+        // A result without a check (an older or a changed tool) isn't taken for a good sign-in.
+        assert!(sign_in_words(&json!({"saved": true})).1);
     }
 
     #[test]

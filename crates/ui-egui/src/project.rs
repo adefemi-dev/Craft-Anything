@@ -63,6 +63,10 @@ impl CraftApp {
         if request.is_empty() {
             return;
         }
+        // A study started now would open the site signed out, or find its sign-in busy.
+        if self.signing_in.is_some() {
+            return self.toast(tr("Finish signing in to the site first."), true);
+        }
         let Some(backend) = self.builder_backend(draft.ai.as_deref()) else { return self.need_builder(true) };
         // Make's pictures are still being checked: start once they are in.
         if self.pending_make_checks > 0 {

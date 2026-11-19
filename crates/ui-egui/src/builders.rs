@@ -197,8 +197,14 @@ impl CraftApp {
                     ws.manifest.builder = v["builder"].as_str().map(str::to_string);
                 }
             }
-            // Refused: the project is as it was, and so is the page.
-            Err(e) => self.toast(e.for_people(), true),
+            // Refused: read back what the project has saved (something else may have changed
+            // it meanwhile); if that fails, the page keeps what it showed.
+            Err(e) => {
+                if let Some(ws) = ws {
+                    let _ = ws.reload();
+                }
+                self.toast(e.for_people(), true);
+            }
         }
     }
 

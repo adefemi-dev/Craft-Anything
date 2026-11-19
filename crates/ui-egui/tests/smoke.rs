@@ -3179,6 +3179,20 @@ fn a_refused_builder_keeps_the_projects_choice() {
     h.get_by_value("Local");
 }
 
+/// A refused choice shows what the project has saved by then, also when something else changed it.
+#[test]
+fn a_refused_builder_shows_the_choice_saved_meanwhile() {
+    let (_d, root, mut h) = project_page(Some("Local"), false);
+    h.run_steps(2);
+    let mut ws = craft_anything_engine::workspace::Workspace::open(&root).unwrap();
+    ws.set_person(|m| m.builder = Some("Gone".into())).unwrap();
+    h.get_by_value("Local").click();
+    h.run();
+    h.get_by_label("Claude").click();
+    assert!(wait(&mut h, |a| a.jobs.running().next().is_none() && a.state.toasts.iter().any(|(_, err)| *err)), "{:?}", h.state().state.toasts);
+    assert_eq!(h.state().workspace.as_ref().unwrap().manifest.builder.as_deref(), Some("Gone"));
+}
+
 /// A refused choice isn't shown even when the project can't be read back.
 #[test]
 fn a_refused_builder_is_not_shown_when_the_project_wont_reload() {

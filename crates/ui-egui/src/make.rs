@@ -89,14 +89,14 @@ pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
             let picked = widgets::segmented(ui, &["Make my own version", "Work on my project", "Just look inside"], door, theme::ControlSize::Large);
             let fits = ui.available_width() >= mode_choice_width(ui);
             if fits {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| mode_choice(app, ui));
+                ui.with_layout(widgets::to_end(egui::Align::Center), |ui| mode_choice(app, ui));
             }
             (picked, fits)
         })
         .inner;
     if !fits {
         ui.add_space(theme::space::SM);
-        ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| mode_choice(app, ui)));
+        ui.horizontal(|ui| ui.with_layout(widgets::to_end(egui::Align::Center), |ui| mode_choice(app, ui)));
     }
     let d = &mut app.state.make;
     if let Some(i) = picked {
@@ -157,7 +157,7 @@ pub fn hero(app: &mut CraftApp, ui: &mut Ui, w: f32) {
         ui.add_space(theme::space::LG);
         ui.horizontal(|ui| {
             crate::builders::built_by(app, ui);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(crate::widgets::to_end(egui::Align::Center), |ui| {
                 let ready = !app.state.make.request.trim().is_empty() && url_problem(&app.state.make.url).is_none() && app.creating.is_none();
                 let start =
                     ui.add(widgets::Button::new(widgets::ButtonKind::Primary, "Start").icon(Some("sparkles")).size(theme::ControlSize::Hero).enabled(ready));
@@ -219,7 +219,7 @@ fn mine(app: &mut CraftApp, ui: &mut Ui, w: f32) {
         ui.add_space(theme::space::LG);
         ui.horizontal(|ui| {
             crate::builders::built_by(app, ui);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(crate::widgets::to_end(egui::Align::Center), |ui| {
                 let said = !app.state.make.request.trim().is_empty();
                 let ready = folder.is_some() && said && app.creating.is_none();
                 let start =

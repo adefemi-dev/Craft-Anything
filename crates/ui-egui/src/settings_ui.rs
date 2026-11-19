@@ -19,106 +19,109 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
     let mut open = true;
     // A modal (dimmed backdrop, Esc or a click outside closes) with a full-size close button;
     // egui's window close box is 14 px.
-    let resp = egui::Modal::new(egui::Id::new("settings-window"))
+    let resp = egui::Modal::new(egui::Id::unique("settings-window"))
         .frame(egui::Frame::new().fill(t.card).corner_radius(t.r_lg()).inner_margin(theme::pad::CARD).stroke(egui::Stroke::new(1.0, t.card_border)))
         .show(ctx, |ui| {
+            // The window's own width, before `reading` lines its content up in it.
             ui.set_width((ctx.content_rect().width() - 2.0 * theme::space::XXL).clamp(560.0, 860.0));
-            ui.horizontal(|ui| {
-                ui.label(theme::heading(tr("Settings"), theme::SECTION));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::button(ui, "x", theme::ControlSize::Medium, false, "Close").clicked() {
-                        open = false;
-                    }
-                });
-            });
-            // An error (a save that failed) shows here too: the message bar is behind this window.
-            if let Some(i) = app.state.toasts.iter().rposition(|(_, error)| *error) {
-                let text = app.state.toasts[i].0.clone();
-                ui.add_space(theme::space::SM);
+            crate::widgets::reading(ui, |ui| {
                 ui.horizontal(|ui| {
-                    icons::show(ui, "triangle-alert", theme::icon::MD, t.danger);
-                    ui.add(egui::Label::new(RichText::new(text).color(t.danger)).wrap());
-                    if icons::button(ui, "x", theme::ControlSize::Small, false, "Dismiss").clicked() {
-                        app.state.toasts.remove(i);
-                    }
-                });
-            }
-            ui.add_space(theme::space::MD);
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(150.0);
-                    for (tab, icon, title) in [
-                        (SettingsTab::General, "settings", "General"),
-                        (SettingsTab::Engines, "cpu", "Engines"),
-                        (SettingsTab::Ai, "bot", "AI"),
-                        (SettingsTab::Builds, "hammer", "Builds"),
-                        (SettingsTab::Plugins, "puzzle", "Plugins"),
-                        (SettingsTab::Safety, "shield", "Safety"),
-                        (SettingsTab::About, "info", "About"),
-                    ] {
-                        // About sits at the bottom of the list, level with the end of the page.
-                        if tab == SettingsTab::About {
-                            ui.add_space((page_height(ctx) - ui.min_rect().height() - TAB_H).max(theme::space::SM));
-                        }
-                        let on = app.state.settings_tab == tab;
-                        let (rect, r) = ui.allocate_exact_size(Vec2::new(150.0, TAB_H), egui::Sense::click());
-                        r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, tr(title)));
-                        if on {
-                            ui.painter().rect_filled(rect, t.radius, t.accent_soft);
-                        } else if r.hovered() {
-                            ui.painter().rect_filled(rect, t.radius, t.hover);
-                        }
-                        icons::paint(
-                            ui,
-                            egui::Rect::from_min_size(egui::pos2(rect.left() + 10.0, rect.center().y - 8.0), Vec2::splat(16.0)),
-                            icon,
-                            16.0,
-                            if on { t.accent_ink } else { t.icon },
-                        );
-                        ui.painter().text(
-                            egui::pos2(rect.left() + 36.0, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            tr(title),
-                            theme::medium(theme::BODY),
-                            if on { t.text } else { t.text_dim },
-                        );
-                        if r.clicked() {
-                            app.state.settings_tab = tab;
-                            if tab == SettingsTab::Ai && app.detected.is_none() {
-                                app.detect_backends();
-                            }
-                        }
-                    }
-                });
-                ui.add_space(theme::space::SM);
-                ui.separator();
-                ui.add_space(theme::space::LG);
-                ui.vertical(|ui| {
-                    // Exactly what's left of the window, with room for the scroll bar a long tab
-                    // gets, so no tab can widen the window (#68).
-                    let w = ui.available_width();
-                    ui.set_width(w);
-                    let content_w = w - ui.spacing().scroll.allocated_width();
-                    let h = page_height(ctx);
-                    // Not shrunk to the tab's content: that gave each tab its own width and put the
-                    // scroll bar in a different place on every page.
-                    let tab = app.state.settings_tab;
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).min_scrolled_height(h).max_height(h).max_width(w).show(ui, |ui| {
-                        // The bar sits at the edge of the area, so the air between it and the
-                        // settings is taken from the settings' side.
-                        ui.set_max_width(content_w - 14.0);
-                        match tab {
-                            SettingsTab::General => general(app, ui),
-                            SettingsTab::Engines => engines(app, ui),
-                            SettingsTab::Ai => ai(app, ui),
-                            SettingsTab::Builds => builds(app, ui),
-                            SettingsTab::Plugins => plugins(app, ui),
-                            SettingsTab::Safety => safety(app, ui),
-                            SettingsTab::About => about(ui),
+                    ui.label(theme::heading(tr("Settings"), theme::SECTION));
+                    ui.with_layout(crate::widgets::to_end(egui::Align::Center), |ui| {
+                        if icons::button(ui, "x", theme::ControlSize::Medium, false, "Close").clicked() {
+                            open = false;
                         }
                     });
                 });
-            });
+                // An error (a save that failed) shows here too: the message bar is behind this window.
+                if let Some(i) = app.state.toasts.iter().rposition(|(_, error)| *error) {
+                    let text = app.state.toasts[i].0.clone();
+                    ui.add_space(theme::space::SM);
+                    ui.horizontal(|ui| {
+                        icons::show(ui, "triangle-alert", theme::icon::MD, t.danger);
+                        ui.add(egui::Label::new(RichText::new(text).color(t.danger)).wrap());
+                        if icons::button(ui, "x", theme::ControlSize::Small, false, "Dismiss").clicked() {
+                            app.state.toasts.remove(i);
+                        }
+                    });
+                }
+                ui.add_space(theme::space::MD);
+                ui.horizontal_top(|ui| {
+                    ui.with_layout(crate::widgets::down(), |ui| {
+                        ui.set_width(150.0);
+                        for (tab, icon, title) in [
+                            (SettingsTab::General, "settings", "General"),
+                            (SettingsTab::Engines, "cpu", "Engines"),
+                            (SettingsTab::Ai, "bot", "AI"),
+                            (SettingsTab::Builds, "hammer", "Builds"),
+                            (SettingsTab::Plugins, "puzzle", "Plugins"),
+                            (SettingsTab::Safety, "shield", "Safety"),
+                            (SettingsTab::About, "info", "About"),
+                        ] {
+                            // About sits at the bottom of the list, level with the end of the page.
+                            if tab == SettingsTab::About {
+                                ui.add_space((page_height(ctx) - ui.min_rect().height() - TAB_H).max(theme::space::SM));
+                            }
+                            let on = app.state.settings_tab == tab;
+                            let (rect, r) = ui.allocate_exact_size(Vec2::new(150.0, TAB_H), egui::Sense::click());
+                            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, tr(title)));
+                            if on {
+                                ui.painter().rect_filled(rect, t.radius, t.accent_soft);
+                            } else if r.hovered() {
+                                ui.painter().rect_filled(rect, t.radius, t.hover);
+                            }
+                            icons::paint(
+                                ui,
+                                widgets::mirror(rect, egui::Rect::from_min_size(egui::pos2(rect.left() + 10.0, rect.center().y - 8.0), Vec2::splat(16.0))),
+                                icon,
+                                16.0,
+                                if on { t.accent_ink } else { t.icon },
+                            );
+                            ui.painter().text(
+                                egui::pos2(widgets::mirror_x(rect, rect.left() + 36.0), rect.center().y),
+                                widgets::start_anchor(egui::Align::Center),
+                                tr(title),
+                                theme::medium(theme::BODY),
+                                if on { t.text } else { t.text_dim },
+                            );
+                            if r.clicked() {
+                                app.state.settings_tab = tab;
+                                if tab == SettingsTab::Ai && app.detected.is_none() {
+                                    app.detect_backends();
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(theme::space::SM);
+                    ui.separator();
+                    ui.add_space(theme::space::LG);
+                    ui.with_layout(crate::widgets::down(), |ui| {
+                        // Exactly what's left of the window, with room for the scroll bar a long tab
+                        // gets, so no tab can widen the window (#68).
+                        let w = ui.available_width();
+                        ui.set_width(w);
+                        let content_w = w - ui.spacing().scroll.allocated_width();
+                        let h = page_height(ctx);
+                        // Not shrunk to the tab's content: that gave each tab its own width and put the
+                        // scroll bar in a different place on every page.
+                        let tab = app.state.settings_tab;
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).min_scrolled_height(h).max_height(h).max_width(w).show(ui, |ui| {
+                            // The bar sits at the edge of the area, so the air between it and the
+                            // settings is taken from the settings' side.
+                            ui.set_max_width(content_w - 14.0);
+                            match tab {
+                                SettingsTab::General => general(app, ui),
+                                SettingsTab::Engines => engines(app, ui),
+                                SettingsTab::Ai => ai(app, ui),
+                                SettingsTab::Builds => builds(app, ui),
+                                SettingsTab::Plugins => plugins(app, ui),
+                                SettingsTab::Safety => safety(app, ui),
+                                SettingsTab::About => about(ui),
+                            }
+                        });
+                    });
+                });
+            })
         });
     if !open || resp.should_close() {
         app.state.settings_open = false;
@@ -128,7 +131,7 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
 fn row(ui: &mut Ui, title: &str, sub: &str, add: impl FnOnce(&mut Ui)) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
+        ui.with_layout(crate::widgets::down(), |ui| {
             ui.set_width(280.0);
             ui.label(RichText::new(tr(title)).font(theme::medium(theme::BODY)));
             if !sub.is_empty() {
@@ -202,7 +205,7 @@ fn general(app: &mut CraftApp, ui: &mut Ui) {
     }
     row(ui, "When a folder you pick has files", "Whether they're the app to edit in place, or material the app starts from beside them.", |ui| {
         let current = crate::folders::EXISTING_CHOICES.iter().find(|(_, v)| *v == app.settings.existing_files).map_or("Ask each time", |(l, _)| *l);
-        widgets::dropdown("existing-files").selected_text(tr(current)).show_ui(ui, |ui| {
+        let r = widgets::dropdown("existing-files").selected_text(tr(current)).show_ui(ui, |ui| {
             for (label, value) in crate::folders::EXISTING_CHOICES {
                 if widgets::menu_item(ui, app.settings.existing_files == value, tr(label)).clicked() {
                     app.settings.existing_files = value;
@@ -210,6 +213,7 @@ fn general(app: &mut CraftApp, ui: &mut Ui) {
                 }
             }
         });
+        widgets::named(r.response, "When a folder you pick has files");
     });
     row(ui, "Theme", "", |ui| {
         // System first: it's the default, and the other two are what it picks between.
@@ -241,7 +245,7 @@ fn language(app: &mut CraftApp, ui: &mut Ui) {
     row(ui, "Language", "", |ui| {
         let selected = (!app.settings.language.trim().is_empty()).then(|| crate::i18n::language_from_tag(&app.settings.language).unwrap_or("en"));
         let current = LANGUAGES.iter().find(|l| Some(l.code) == selected).map(|l| l.name).unwrap_or("System");
-        widgets::dropdown("lang").selected_text(tr(current)).show_ui(ui, |ui| {
+        let r = widgets::dropdown("lang").selected_text(tr(current)).show_ui(ui, |ui| {
             if widgets::menu_item(ui, app.settings.language.trim().is_empty(), tr("System")).clicked() {
                 app.settings.language.clear();
                 crate::i18n::set_language("");
@@ -255,6 +259,7 @@ fn language(app: &mut CraftApp, ui: &mut Ui) {
                 }
             }
         });
+        widgets::named(r.response, "Language");
     });
 }
 
@@ -331,14 +336,16 @@ fn engines(app: &mut CraftApp, ui: &mut Ui) {
     ui.label(RichText::new(tr("Leave a path empty to use the managed install. We never need environment variables.")).color(t.text_faint).size(theme::CAPTION));
     ui.add_space(theme::space::SM);
     let mut changed = false;
-    egui::Grid::new("tool-paths").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-        // Names and purposes come from the engine table; the override list matches it (tested).
-        for (id, v) in app.settings.engines.tools.entries_mut() {
-            let (name, needed_for) = craft_anything_engines::engine(id).map(|e| (e.name, e.needed_for)).unwrap_or((id, ""));
-            ui.label(RichText::new(tr(name)).size(theme::CAPTION)).on_hover_text(format!("{}\n{id}", tr(needed_for)));
-            changed |= path_field(ui, v, name, "managed");
-            ui.end_row();
-        }
+    widgets::ltr(ui, |ui| {
+        egui::Grid::new("tool-paths").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            // Names and purposes come from the engine table; the override list matches it (tested).
+            for (id, v) in app.settings.engines.tools.entries_mut() {
+                let (name, needed_for) = craft_anything_engines::engine(id).map(|e| (e.name, e.needed_for)).unwrap_or((id, ""));
+                ui.label(RichText::new(tr(name)).size(theme::CAPTION)).on_hover_text(format!("{}\n{id}", tr(needed_for)));
+                changed |= path_field(ui, v, name, "managed");
+                ui.end_row();
+            }
+        })
     });
     if changed {
         app.settings_changed();
@@ -351,7 +358,8 @@ fn model_options_loading(ui: &mut Ui, backend: &str) {
     ui.add_enabled_ui(false, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(tr("Context window"));
-            widgets::dropdown(("model-context", backend)).selected_text(tr("Default")).show_ui(ui, |_| {});
+            let r = widgets::dropdown(("model-context", backend)).selected_text(tr("Default")).show_ui(ui, |_| {});
+            widgets::named(r.response, "Context window");
         });
     });
 }
@@ -386,7 +394,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
     // A saved API key being replaced or forgotten (the keychain work happens off this frame).
     let (mut save_key, mut forget_key) = (None, None);
     // The AI whose Remove was pressed once: asked again before its key is deleted.
-    let confirm_id = egui::Id::new("remove-ai");
+    let confirm_id = egui::Id::unique("remove-ai");
     let confirming: Option<String> = ui.data(|d| d.get_temp(confirm_id));
     for b in &app.backends {
         widgets::panel(&t).show(ui, |ui| {
@@ -395,7 +403,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
             // hover), and at its end whether it's the one in use and the way to remove it.
             ui.horizontal(|ui| {
                 icons::show(ui, "bot", theme::icon::LG, if b.enabled { t.accent } else { t.text_faint });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(widgets::to_end(egui::Align::Center), |ui| {
                     if confirming.as_ref() != Some(&b.name)
                         && icons::button(ui, "trash-2", theme::ControlSize::Small, false, &trf("Remove {name}", &[("name", &b.name)])).clicked()
                     {
@@ -404,7 +412,10 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                     if app.state.backend.as_ref() == Some(&b.name) {
                         widgets::pill(ui, "In use", t.on_accent, t.accent);
                     }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // The name from where reading starts, in the room the end leaves.
+                    let along =
+                        if widgets::rtl() { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+                    ui.with_layout(along, |ui| {
                         ui.add(egui::Label::new(RichText::new(&b.name).font(theme::semibold(theme::BODY))).truncate());
                     });
                 });
@@ -457,7 +468,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                     // account. Saved on Enter or when the field is left; empty is its usual one.
                     if craft_anything_ai::folder_var(b).is_some() {
                         let saved = app.backend_options.get(&b.name).and_then(|o| o.config_dir.clone()).unwrap_or_default();
-                        let id = egui::Id::new(("agent-folder", &b.name));
+                        let id = egui::Id::unique(("agent-folder", &b.name));
                         // What was typed stays until it's saved (or refused, so it can be fixed).
                         if folder_drafts.get(&b.name).is_some_and(|d| d.trim() == saved) && !ui.memory(|m| m.has_focus(id)) {
                             folder_drafts.remove(&b.name);
@@ -491,7 +502,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                     let effort = craft_anything_ai::effort_in_use(b, app.backend_options.get(&b.name));
                     let effort_levels = craft_anything_ai::effort_levels(b);
                     if b.kind == BackendKind::AgentCli && b.ssh_host.as_deref().is_some_and(|h| !h.trim().is_empty()) {
-                        let id = egui::Id::new(("remote-agent-program", &b.name));
+                        let id = egui::Id::unique(("remote-agent-program", &b.name));
                         let mut program = ui
                             .data_mut(|d| d.get_temp::<String>(id))
                             .unwrap_or_else(|| app.backend_options.get(&b.name).and_then(|o| o.command.clone()).unwrap_or_default());
@@ -567,13 +578,14 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                                             m.to_string()
                                         }
                                     };
-                                    widgets::dropdown(("model", &b.name)).selected_text(shown(&picked)).show_ui(ui, |ui| {
+                                    let r = widgets::dropdown(("model", &b.name)).selected_text(shown(&picked)).show_ui(ui, |ui| {
                                         for m in models {
                                             if widgets::menu_item(ui, *m == picked, shown(m)).clicked() && *m != picked {
                                                 chosen_model = Some((b.name.clone(), m.clone()));
                                             }
                                         }
                                     });
+                                    widgets::named(r.response, "Model");
                                     if widgets::caption_link(ui, "Cancel").clicked() {
                                         close_picker = true;
                                     }
@@ -582,7 +594,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                             if !effort_levels.is_empty() {
                                 ui.label(RichText::new(tr("Effort:")).color(t.text_faint).size(theme::CAPTION));
                                 let shown = effort.map_or("default", craft_anything_ai::Effort::as_str);
-                                widgets::dropdown(("effort", &b.name)).selected_text(shown).show_ui(ui, |ui| {
+                                let r = widgets::dropdown(("effort", &b.name)).selected_text(shown).show_ui(ui, |ui| {
                                     // Claude always has a level; an OpenAI-style API is sent none until one is chosen.
                                     let unset = (effort_levels != craft_anything_ai::Effort::ALL).then_some(None);
                                     for e in unset.into_iter().chain(effort_levels.iter().map(|&e| Some(e))) {
@@ -592,6 +604,7 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                                         }
                                     }
                                 });
+                                widgets::named(r.response, "Effort:");
                             }
                         });
                     }
@@ -607,12 +620,13 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                                             .and_then(|value| choices.context.iter().find(|choice| choice.value == value))
                                             .map(|choice| tr(&choice.label))
                                             .unwrap_or_else(|| tr("Default"));
-                                        widgets::dropdown(("model-context", &b.name)).selected_text(label).show_ui(ui, |ui| {
+                                        let r = widgets::dropdown(("model-context", &b.name)).selected_text(label).show_ui(ui, |ui| {
                                             changed |= widgets::menu_choice(ui, &mut draft.context, None, tr("Default"));
                                             for choice in &choices.context {
                                                 changed |= widgets::menu_choice(ui, &mut draft.context, Some(choice.value), tr(&choice.label));
                                             }
                                         });
+                                        widgets::named(r.response, "Context window");
                                     });
                                 });
                                 if changed {
@@ -911,36 +925,37 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
         let configured = app.backends.iter().any(|b| b.name == d.suggestion.name);
         widgets::panel(&t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            // The buttons first, in the top right corner, then the name and reason wrapped in the
-            // width they leave: a label in a horizontal row doesn't wrap, so a long reason ran on
-            // under the Add button.
+            // The buttons first, in the top corner at the end (the right, or the left right to left),
+            // then the name and reason wrapped in the width they leave: a label in a horizontal row
+            // doesn't wrap, so a long reason ran on under the Add button.
             // Child uis (not scopes, which would move the cursor down after each), then one advance.
             let top = ui.available_rect_before_wrap();
-            let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(top).layout(egui::Layout::right_to_left(egui::Align::Min)));
+            let mut end_ui = ui.new_child(egui::UiBuilder::new().max_rect(top).layout(widgets::to_end(egui::Align::Min)));
             if configured {
-                widgets::pill(&mut right_ui, "Added", t.success, t.raised);
+                widgets::pill(&mut end_ui, "Added", t.success, t.raised);
                 // Claude Code once more, to give it another account's folder.
                 if craft_anything_ai::folder_var(&d.suggestion).is_some()
-                    && widgets::link(&mut right_ui, "Add another").on_hover_text(tr("Add it again, to choose another account's folder for it.")).clicked()
+                    && widgets::link(&mut end_ui, "Add another").on_hover_text(tr("Add it again, to choose another account's folder for it.")).clicked()
                 {
                     let taken = |n: &String| app.backends.iter().any(|b| &b.name == n);
                     if let Some(name) = (2..100).map(|i| format!("{} {i}", d.suggestion.name)).find(|n| !taken(n)) {
                         app.add_backend(craft_anything_ai::BackendConfig { name, ..d.suggestion.clone() }, None);
                     }
                 }
-            } else if !d.needs_key && widgets::primary(&mut right_ui, "Add").clicked() {
+            } else if !d.needs_key && widgets::primary(&mut end_ui, "Add").clicked() {
                 app.add_backend(d.suggestion.clone(), None);
             }
-            let right = right_ui.min_rect();
-            // Nothing on the right (a key to paste below instead): the text takes the whole width.
-            let text_right = if right.width() > 0.0 { right.left() - ui.spacing().item_spacing.x } else { top.right() };
-            let mut left_ui =
-                ui.new_child(egui::UiBuilder::new().max_rect(top.with_max_x(text_right.max(top.left()))).layout(egui::Layout::top_down(egui::Align::Min)));
-            left_ui.add(egui::Label::new(RichText::new(&d.suggestion.name).font(theme::medium(theme::SMALL))).wrap());
-            left_ui.add(
+            let end = end_ui.min_rect();
+            // Measured as if left to right, then mirrored. Nothing at the end (a key to paste below
+            // instead): the text takes the whole width.
+            let text_right = if end.width() > 0.0 { widgets::mirror(top, end).left() - ui.spacing().item_spacing.x } else { top.right() };
+            let text = widgets::mirror(top, top.with_max_x(text_right.max(top.left())));
+            let mut text_ui = ui.new_child(egui::UiBuilder::new().max_rect(text).layout(widgets::down()));
+            text_ui.add(egui::Label::new(RichText::new(&d.suggestion.name).font(theme::medium(theme::SMALL))).wrap());
+            text_ui.add(
                 egui::Label::new(RichText::new(&d.reason).color(t.text_faint).size(theme::CAPTION).line_height(Some(theme::leading(theme::CAPTION)))).wrap(),
             );
-            ui.advance_cursor_after_rect(left_ui.min_rect().union(right));
+            ui.advance_cursor_after_rect(text_ui.min_rect().union(end));
             // A subscription key is worth pasting even when the environment already has one, so a
             // different key can be used without restarting the app.
             let pastable = d.needs_key || d.suggestion.base_url.as_deref().is_some_and(craft_anything_ai::openai::is_opencode_go);
@@ -1102,7 +1117,7 @@ fn builds(app: &mut CraftApp, ui: &mut Ui) {
     let table = craft_anything_engines::assets::Catalogue::built_in();
     row(ui, "Picture model", "What pictures and textures are made with.", |ui| {
         let current = table.image_model(a.image_model.as_deref()).or_else(|_| table.image_model(None)).map(|m| m.name.clone()).unwrap_or_default();
-        widgets::dropdown("image-model").selected_text(current).show_ui(ui, |ui| {
+        let r = widgets::dropdown("image-model").selected_text(current).show_ui(ui, |ui| {
             for m in table.images() {
                 let price = crate::usage::asset_cost_words(m.cost(craft_anything_engines::assets::Shape::Square));
                 let label = format!("{} · {} {}", m.name, price, tr("a picture"));
@@ -1113,6 +1128,7 @@ fn builds(app: &mut CraftApp, ui: &mut Ui) {
                 }
             }
         });
+        widgets::named(r.response, "Picture model");
     });
     if changed {
         app.settings_changed();
@@ -1143,7 +1159,7 @@ fn plugins(app: &mut CraftApp, ui: &mut Ui) {
     for (i, p) in plugins.iter().enumerate() {
         widgets::panel(&t).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
+                ui.with_layout(crate::widgets::down(), |ui| {
                     ui.set_width(300.0);
                     ui.label(RichText::new(p.display_name()).font(theme::medium(theme::SMALL)));
                     ui.label(RichText::new(p.place()).font(theme::mono(theme::CAPTION)).color(t.text_faint));
@@ -1170,7 +1186,7 @@ fn plugins(app: &mut CraftApp, ui: &mut Ui) {
     for (i, p) in wasm.iter().enumerate() {
         widgets::panel(&t).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
+                ui.with_layout(crate::widgets::down(), |ui| {
                     ui.set_width(300.0);
                     ui.label(RichText::new(p.display_name()).font(theme::medium(theme::SMALL)));
                     ui.label(RichText::new(p.path.display().to_string()).font(theme::mono(theme::CAPTION)).color(t.text_faint));
@@ -1599,7 +1615,7 @@ mod tests {
                 AgentModel { id: "provider/model".into(), name: "Friendly name".into(), thinking: Vec::new() },
             ])),
         };
-        let mut harness = Harness::builder().build_ui(move |ui| {
+        let mut harness = Harness::builder().allow_missing_glyphs().build_ui(move |ui| {
             theme::install_fonts(ui.ctx());
             crate::builders::agent_model_picker(ui, &mut picker);
         });
@@ -1630,7 +1646,7 @@ mod tests {
                 directory: None,
             };
             let mut picker = AgentModelPicker { request: 1, context, model: Some("missing-model".into()), thinking: None, result: Some(Ok(Vec::new())) };
-            let harness = Harness::builder().build_ui(move |ui| {
+            let harness = Harness::builder().allow_missing_glyphs().build_ui(move |ui| {
                 theme::install_fonts(ui.ctx());
                 crate::builders::agent_model_picker(ui, &mut picker);
             });

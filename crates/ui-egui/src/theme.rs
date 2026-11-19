@@ -224,7 +224,7 @@ const RADIUS: f32 = 6.0;
 const RADIUS_LG: f32 = 8.0;
 
 fn tokens_id() -> egui::Id {
-    egui::Id::new("craft-anything-theme")
+    egui::Id::unique("craft-anything-theme")
 }
 
 // ---- fonts -------------------------------------------------------------------------------------

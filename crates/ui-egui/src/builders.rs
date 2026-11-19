@@ -419,7 +419,7 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, t.radius, t.accent_soft);
         icons::paint(ui, rect, "bot", theme::icon::XL, t.accent_ink);
-        ui.vertical(|ui| {
+        ui.with_layout(crate::widgets::down(), |ui| {
             ui.label(theme::heading(tr("Set up a builder"), theme::CARD));
             ui.add(
                 egui::Label::new(
@@ -462,11 +462,11 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 icons::show(ui, "bot", theme::icon::LG, t.accent);
-                ui.vertical(|ui| {
+                ui.with_layout(crate::widgets::down(), |ui| {
                     ui.label(RichText::new(&b.name).font(theme::semibold(theme::SMALL)));
                     ui.label(RichText::new(tr("Found on this computer")).color(t.text_faint).size(theme::CAPTION));
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(crate::widgets::to_end(egui::Align::Center), |ui| {
                     let label = if start { trf("Build with {name}", &[("name", &b.name)]) } else { trf("Use {name}", &[("name", &b.name)]) };
                     if widgets::primary(ui, &label).clicked() {
                         *close = true;
@@ -492,7 +492,7 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
             app.state.settings_open = true;
             app.state.settings_tab = crate::state::SettingsTab::Ai;
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.with_layout(crate::widgets::to_end(egui::Align::Center), |ui| {
             if widgets::secondary(ui, None, "Cancel").clicked() {
                 *close = true;
             }

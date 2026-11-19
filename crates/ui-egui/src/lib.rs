@@ -1141,24 +1141,26 @@ impl CraftApp {
             _ => "Part of the app is stuck. Restarting clears it, and your work is kept.",
         };
         egui::Panel::top("stuck-banner").frame(egui::Frame::new().fill(t.card).inner_margin(theme::pad::BAR)).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                icons::show(ui, "triangle-alert", crate::theme::icon::MD, t.danger);
-                ui.label(egui::RichText::new(i18n::tr(text)).color(t.text)).on_hover_text(problem.summary.clone());
-                if let Some(path) = &problem.log
-                    && widgets::secondary(ui, None, "Open log").on_hover_text(path.display().to_string()).clicked()
-                {
-                    self.open_log(path);
-                }
-                if widgets::secondary(ui, None, "Restart").clicked() {
-                    match craft_anything_platform::process::start_another_copy() {
-                        Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                        Err(e) => self.toast(e.message, true),
+            crate::widgets::reading(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    icons::show(ui, "triangle-alert", crate::theme::icon::MD, t.danger);
+                    ui.label(egui::RichText::new(i18n::tr(text)).color(t.text)).on_hover_text(problem.summary.clone());
+                    if let Some(path) = &problem.log
+                        && widgets::secondary(ui, None, "Open log").on_hover_text(path.display().to_string()).clicked()
+                    {
+                        self.open_log(path);
                     }
-                }
-                if widgets::secondary(ui, None, "Dismiss").clicked() {
-                    sync::dismiss(&problem.summary);
-                }
-            });
+                    if widgets::secondary(ui, None, "Restart").clicked() {
+                        match craft_anything_platform::process::start_another_copy() {
+                            Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                            Err(e) => self.toast(e.message, true),
+                        }
+                    }
+                    if widgets::secondary(ui, None, "Dismiss").clicked() {
+                        sync::dismiss(&problem.summary);
+                    }
+                });
+            })
         });
     }
 
@@ -1939,6 +1941,11 @@ impl CraftApp {
             theme::apply(ctx, want.0, want.1);
             self.applied_theme = Some(want);
         }
+        // egui's own parts (scroll bars, menus, collapsing arrows) follow the language's direction.
+        let rtl = widgets::rtl();
+        if ctx.global_style().right_to_left != rtl {
+            ctx.global_style_mut(|s| s.right_to_left = rtl);
+        }
         self.take_finished_jobs();
         if let Some(url) = self.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));
@@ -2018,7 +2025,7 @@ impl CraftApp {
         }
 
         if self.beginner() || self.state.screen != Screen::Workbench {
-            egui::Panel::left("app-sidebar")
+            widgets::start_panel("app-sidebar")
                 .exact_size(sidebar::width(self, &ctx))
                 .resizable(false)
                 .frame(egui::Frame::new().fill(t.chrome).inner_margin(theme::pad::GUTTER))
@@ -2075,7 +2082,7 @@ impl CraftApp {
         let mut dismiss = None;
         // Where each card keeps room for its close button.
         let mut close_at = Vec::with_capacity(self.state.toasts.len());
-        egui::Area::new(egui::Id::new("toasts"))
+        egui::Area::new(egui::Id::unique("toasts"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, titlebar::HEIGHT + theme::space::SM))
             .interactable(false)
@@ -2090,34 +2097,36 @@ impl CraftApp {
                 let line = theme::leading(theme::SMALL);
                 let nudge = ((side - line) / 2.0).max(0.0);
                 let inner = width - 2.0 * theme::space::MD - 2.0;
-                for (i, (text, error)) in self.state.toasts.iter().enumerate() {
-                    egui::Frame::new()
-                        .fill(t.field)
-                        .stroke(egui::Stroke::new(1.0, t.card_border))
-                        .corner_radius(t.r_lg())
-                        .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: t.shadow })
-                        .inner_margin(theme::pad::PANEL)
-                        .show(ui, |ui| {
-                            ui.set_width(inner);
-                            ui.horizontal_top(|ui| {
-                                let (icon, col) = if *error { ("triangle-alert", t.danger) } else { ("check", t.success) };
-                                let (mark, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
-                                icons::paint(ui, mark, icon, theme::icon::MD, col);
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 0.0;
-                                    ui.set_width(inner - 2.0 * (side + theme::space::SM));
-                                    ui.add_space(nudge);
-                                    ui.add(egui::Label::new(egui::RichText::new(text).size(theme::SMALL).line_height(Some(line)).color(t.text)).wrap());
-                                    ui.add_space(nudge);
+                crate::widgets::reading(ui, |ui| {
+                    for (i, (text, error)) in self.state.toasts.iter().enumerate() {
+                        egui::Frame::new()
+                            .fill(t.field)
+                            .stroke(egui::Stroke::new(1.0, t.card_border))
+                            .corner_radius(t.r_lg())
+                            .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: t.shadow })
+                            .inner_margin(theme::pad::PANEL)
+                            .show(ui, |ui| {
+                                ui.set_width(inner);
+                                ui.horizontal_top(|ui| {
+                                    let (icon, col) = if *error { ("triangle-alert", t.danger) } else { ("check", t.success) };
+                                    let (mark, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
+                                    icons::paint(ui, mark, icon, theme::icon::MD, col);
+                                    ui.with_layout(crate::widgets::down(), |ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        ui.set_width(inner - 2.0 * (side + theme::space::SM));
+                                        ui.add_space(nudge);
+                                        ui.add(egui::Label::new(egui::RichText::new(text).size(theme::SMALL).line_height(Some(line)).color(t.text)).wrap());
+                                        ui.add_space(nudge);
+                                    });
+                                    let (slot, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
+                                    close_at.push((i, slot));
                                 });
-                                let (slot, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
-                                close_at.push((i, slot));
                             });
-                        });
-                }
+                    }
+                })
             });
         for (i, slot) in close_at {
-            egui::Area::new(egui::Id::new(("toast-close", i))).order(egui::Order::Tooltip).fixed_pos(slot.min).show(ctx, |ui| {
+            egui::Area::new(egui::Id::unique(("toast-close", i))).order(egui::Order::Tooltip).fixed_pos(slot.min).show(ctx, |ui| {
                 if icons::button(ui, "x", theme::ControlSize::Small, false, "Dismiss").clicked() {
                     dismiss = Some(i);
                 }
@@ -2137,7 +2146,7 @@ impl CraftApp {
         }
         let t = theme::Tokens::get(ctx);
         let rect = ctx.content_rect();
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop")));
         painter.rect_filled(rect, 0.0, t.shadow);
         let inner = rect.shrink(40.0);
         painter.rect_stroke(inner, t.radius_lg, egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
@@ -2246,7 +2255,8 @@ pub fn guard<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
 
 /// Draw part of the UI; a panic shows a calm notice in its place instead of crashing.
 pub fn guard_ui(ui: &mut egui::Ui, what: &str, f: impl FnOnce(&mut egui::Ui)) {
-    let ok = guard(what, || f(ui)).is_some();
+    // In a right-to-left language the panel's content lines up on the right.
+    let ok = guard(what, || widgets::reading(ui, f)).is_some();
     if !ok {
         let t = theme::Tokens::get(ui.ctx());
         ui.colored_label(t.danger, tr("Part of this screen hit a bug and was skipped. Your work is safe."));

@@ -217,7 +217,7 @@ pub fn ghidra_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, t.radius, t.accent_soft);
         icons::paint(ui, rect, if ready { "check" } else { "microscope" }, theme::icon::XL, t.accent_ink);
-        ui.vertical(|ui| {
+        ui.with_layout(crate::widgets::down(), |ui| {
             let title = if ready {
                 "Ghidra is ready"
             } else if downloading.is_some() {
@@ -330,7 +330,7 @@ pub fn ghidra_memory_guide() -> String {
 pub fn ghidra_memory_setting(app: &mut CraftApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let set = ghidra_memory(app);
-    ui.vertical(|ui| {
+    ui.with_layout(crate::widgets::down(), |ui| {
         if let Some(i) = widgets::segmented(ui, &["Automatic", "Custom"], usize::from(set.is_some()), theme::ControlSize::Medium) {
             // Custom starts from what a program of a few hundred MB wants.
             app.settings.engines.ghidra.memory_gb = (i == 1).then(|| ghidra::suggested_heap_gb(500 << 20));
@@ -496,7 +496,7 @@ pub fn assets_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, t.radius, t.accent_soft);
         icons::paint(ui, rect, "boxes", theme::icon::XL, t.accent_ink);
-        ui.vertical(|ui| {
+        ui.with_layout(crate::widgets::down(), |ui| {
             ui.label(theme::heading(tr("Your fal.ai key"), theme::SECTION));
             ui.label(RichText::new(tr("Generated pictures and 3D models are made with fal.ai.")).color(t.text_dim));
         });
@@ -825,7 +825,7 @@ pub fn modal(app: &mut CraftApp, ui: &mut Ui, b: Builder, close: &mut bool) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, t.radius, t.accent_soft);
         icons::paint(ui, rect, if ready { "check" } else { "download" }, theme::icon::XL, t.accent_ink);
-        ui.vertical(|ui| {
+        ui.with_layout(crate::widgets::down(), |ui| {
             let title = if ready { trf("{name} is ready", &[("name", b.name())]) } else { trf("Get {name}", &[("name", b.name())]) };
             ui.label(theme::heading(title, theme::SECTION));
             ui.label(RichText::new(tr(b.needs())).color(t.text_dim));
@@ -849,7 +849,7 @@ pub fn modal(app: &mut CraftApp, ui: &mut Ui, b: Builder, close: &mut bool) {
                 ui.painter().galley_with_override_text_color(r.center() - g.size() / 2.0, g, if now { t.text } else { t.text_faint });
             }
             ui.add_space(theme::space::XS);
-            ui.vertical(|ui| {
+            ui.with_layout(crate::widgets::down(), |ui| {
                 ui.label(RichText::new(&s.title).font(theme::semibold(theme::BODY)).color(if s.done || now { t.text } else { t.text_dim }));
                 if now || !s.done {
                     ui.add(
@@ -940,7 +940,8 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, message: &str) {
             ((x - 0.25).max(0.0), x)
         }
     };
-    ui.painter().rect_filled(egui::Rect::from_x_y_ranges(bar.left() + bar.width() * from..=bar.left() + bar.width() * to, bar.y_range()), 3.0, t.accent);
+    let done = egui::Rect::from_x_y_ranges(bar.left() + bar.width() * from..=bar.left() + bar.width() * to, bar.y_range());
+    ui.painter().rect_filled(widgets::mirror(bar, done), 3.0, t.accent);
     ui.add_space(theme::space::XS);
     let pct = fraction.map(|f| format!("{:.0}%  ·  ", f * 100.0)).unwrap_or_default();
     ui.label(RichText::new(format!("{pct}{message}")).font(theme::mono(theme::CODE)).color(t.text_dim));

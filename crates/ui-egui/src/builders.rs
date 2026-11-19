@@ -174,15 +174,12 @@ impl CraftApp {
 
     /// Choose what builds a project's next changes (`None`: Automatic again), through the
     /// project_builder_set tool. An agent app that was only found is set up first, as Start does,
-    /// since the tool takes only an AI that is set up. Shown at once; the tool's answer is kept.
+    /// since the tool takes only an AI that is set up. The page shows the choice once it's saved.
     pub fn set_project_builder(&mut self, root: &std::path::Path, builder: Option<String>) {
         if let Some(name) = &builder
             && self.builder_backend(Some(name)).as_deref() != Some(name.as_str())
         {
             return;
-        }
-        if let Some(ws) = self.workspace.as_mut().filter(|w| w.root == root) {
-            ws.manifest.builder.clone_from(&builder);
         }
         let params = serde_json::json!({"project": root, "builder": builder.as_deref().unwrap_or("default")});
         self.act("project_builder_set", params, tr("Choose what builds a project"));
@@ -190,11 +187,18 @@ impl CraftApp {
 
     /// After project_builder_set: show what the project saved (also when it refused the choice).
     pub(crate) fn project_builder_set(&mut self, params: &serde_json::Value, result: Result<serde_json::Value, craft_anything_engine::evidence::ToolError>) {
-        if let Some(ws) = self.workspace.as_mut().filter(|w| params["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p))) {
-            let _ = ws.reload();
-        }
-        if let Err(e) = result {
-            self.toast(e.for_people(), true);
+        let ws = self.workspace.as_mut().filter(|w| params["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p)));
+        match result {
+            // What the project saved (the person's other changes on disk come along).
+            Ok(v) => {
+                if let Some(ws) = ws
+                    && ws.reload().is_err()
+                {
+                    ws.manifest.builder = v["builder"].as_str().map(str::to_string);
+                }
+            }
+            // Refused: the project is as it was, and so is the page.
+            Err(e) => self.toast(e.for_people(), true),
         }
     }
 
@@ -449,7 +453,10 @@ fn choose(ui: &mut Ui, id: &str, chosen: Option<&str>, default: &str, choices: &
 pub fn project_built_by(app: &mut CraftApp, ui: &mut Ui, ws: &craft_anything_engine::workspace::Workspace) {
     let Some(default) = app.default_builder() else { return };
     let t = Tokens::get(ui.ctx());
-    let choices = app.builder_choices();
+    let mut choices = app.builder_choices();
+    // project_builder_set reads `default` (any case) as Automatic, so an AI named that can't be
+    // chosen for one project.
+    choices.retain(|c| !c.name.trim().eq_ignore_ascii_case("default"));
     let saved = ws.manifest.builder.as_deref().filter(|b| !b.is_empty());
     let kept = saved.filter(|b| choices.iter().any(|c| c.name == *b));
     ui.add_space(theme::space::SM);

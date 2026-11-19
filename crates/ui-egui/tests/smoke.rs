@@ -3179,6 +3179,35 @@ fn a_refused_builder_keeps_the_projects_choice() {
     h.get_by_value("Local");
 }
 
+/// A refused choice isn't shown even when the project can't be read back.
+#[test]
+fn a_refused_builder_is_not_shown_when_the_project_wont_reload() {
+    let (_d, root, mut h) = project_page(Some("Local"), false);
+    h.run_steps(2);
+    std::fs::write(root.join(craft_anything_engine::workspace::MANIFEST), "not json").unwrap();
+    h.get_by_value("Local").click();
+    h.run();
+    h.get_by_label("Claude").click();
+    assert!(wait(&mut h, |a| a.jobs.running().next().is_none() && a.state.toasts.iter().any(|(_, err)| *err)), "{:?}", h.state().state.toasts);
+    assert_eq!(h.state().workspace.as_ref().unwrap().manifest.builder.as_deref(), Some("Local"));
+    h.run_steps(2);
+    h.get_by_value("Local");
+}
+
+/// An AI named like Automatic's keyword isn't offered: the tool would save Automatic instead.
+#[test]
+fn an_ai_named_default_is_not_offered_for_a_project() {
+    let (_d, _root, mut h) = project_page(None, false);
+    let mut named = h.state().backends[0].clone();
+    named.name = "DEFAULT".into();
+    h.state_mut().backends.push(named);
+    h.run_steps(2);
+    h.get_by_value("Automatic (Claude)").click();
+    h.run();
+    h.get_by_label("Local");
+    assert!(h.query_by_label("DEFAULT").is_none());
+}
+
 /// A saved builder that was removed shows Automatic and who builds instead, without changing
 /// what the project saved.
 #[test]
@@ -3198,7 +3227,7 @@ fn a_found_agent_picked_on_a_project_page_is_set_up_and_saved() {
     h.get_by_value("Automatic (Claude)").click();
     h.run();
     h.get_by_label("Claude Code").click();
-    assert!(wait(&mut h, |_| saved_builder(&root).as_deref() == Some("Claude Code")), "{:?}", h.state().state.toasts);
+    assert!(wait(&mut h, |a| saved_builder(&root).as_deref() == Some("Claude Code") && a.jobs.running().next().is_none()), "{:?}", h.state().state.toasts);
     assert!(h.state().backends.iter().any(|b| b.name == "Claude Code" && b.enabled), "set up in the app");
     h.run_steps(2);
     h.get_by_value("Claude Code");

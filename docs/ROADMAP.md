@@ -550,7 +550,7 @@ been run live.
       Not run against a live provider — claimed: justinjohn0306, branch `feature/r5.4-requests-per-minute`
 - [x] Offer `requests_per_minute` in Settings → AI and `ai request-rate` (#668)
       — PR #1841; claimed: rudycelekli, branch feature/r5.4-request-rate-setting
-- [ ] Say in the feed when a build is waiting for its turn (#668)
+- [x] Say in the feed when a build is waiting for its turn (#668)
       — claimed: justinjohn0306, branch feature/r5.4-say-when-a-request-waits
 - [ ] A tokens-per-minute limit isn't covered by the request pacing (#668)
 - [x] Find LM Studio on another port (#73): the port in its settings file (when it is there) and

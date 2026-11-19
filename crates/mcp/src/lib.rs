@@ -275,9 +275,10 @@ impl Server {
             let token = CancelToken::default();
             self.inflight.lock().unwrap_or_else(PoisonError::into_inner).insert(id_key(&id), token.clone());
             let me = self.clone();
+            let thread_id = id.clone();
             let spawned = std::thread::Builder::new().name("mcp-call".into()).spawn(move || {
-                let resp = me.tools_call(&id, &params, &token);
-                me.inflight.lock().unwrap_or_else(PoisonError::into_inner).remove(&id_key(&id));
+                let resp = me.tools_call(&thread_id, &params, &token);
+                me.inflight.lock().unwrap_or_else(PoisonError::into_inner).remove(&id_key(&thread_id));
                 if !token.is_cancelled() {
                     me.send(&resp);
                 }

@@ -180,7 +180,7 @@ pub fn scan_html(src: &str) -> HtmlFacts {
                 let module = get(&attrs, "type").is_some_and(|t| t.eq_ignore_ascii_case("module"));
                 let line = lines.line(u32::try_from(at).unwrap_or(u32::MAX));
                 let src_attr = get(&attrs, "src").map(String::from);
-                let js = javascript_type(get(&attrs, "type"));
+                let js = javascript_type(get(&attrs, "type"), get(&attrs, "language"));
                 let inline = (src_attr.is_none() && close > end && js && src.get(end..close).is_some_and(|t| !t.trim().is_empty()))
                     .then(|| (u32::try_from(end).unwrap_or(u32::MAX), u32::try_from(close).unwrap_or(u32::MAX)));
                 if js && (src_attr.is_some() || inline.is_some()) {
@@ -245,34 +245,38 @@ pub fn scan_html(src: &str) -> HtmlFacts {
     out
 }
 
-/// Whether a `<script type>` is code the page runs: no type, a JavaScript MIME type or `module`
-/// (and JSX for in-browser Babel, which is code too). Import maps, speculation rules and data
-/// blocks such as JSON or HTML templates aren't JavaScript (#285).
-fn javascript_type(t: Option<&str>) -> bool {
-    let Some(t) = t else { return true };
-    if t.is_empty() || t.eq_ignore_ascii_case("module") {
-        return true;
+const JAVASCRIPT_MIME_TYPES: &[&str] = &[
+    "text/javascript",
+    "text/javascript1.0",
+    "text/javascript1.1",
+    "text/javascript1.2",
+    "text/javascript1.3",
+    "text/javascript1.4",
+    "text/javascript1.5",
+    "application/javascript",
+    "application/ecmascript",
+    "text/ecmascript",
+    "application/x-javascript",
+    "application/x-ecmascript",
+    "text/x-javascript",
+    "text/x-ecmascript",
+    "text/jscript",
+    "text/livescript",
+];
+
+/// Whether a script is executable code to inventory, including explicit in-browser Babel types.
+fn javascript_type(t: Option<&str>, language: Option<&str>) -> bool {
+    let whitespace = |c: char| c.is_ascii_whitespace();
+    if let Some(t) = t {
+        if t.is_empty() || t.eq_ignore_ascii_case("module") {
+            return true;
+        }
+        let essence = t.trim_matches(whitespace);
+        return JAVASCRIPT_MIME_TYPES.iter().chain(&["text/babel", "text/jsx"]).any(|m| m.eq_ignore_ascii_case(essence));
     }
-    let essence = t.trim_matches(|c: char| c.is_ascii_whitespace()).to_ascii_lowercase();
-    matches!(essence.as_str(), "text/babel" | "text/jsx" | "text/jscript" | "text/livescript")
-        || [
-            "text/javascript",
-            "text/javascript1.0",
-            "text/javascript1.1",
-            "text/javascript1.2",
-            "text/javascript1.3",
-            "text/javascript1.4",
-            "text/javascript1.5",
-            "application/javascript",
-            "application/ecmascript",
-            "text/ecmascript",
-            "application/x-javascript",
-            "application/x-ecmascript",
-            "text/x-javascript",
-            "text/x-ecmascript",
-        ]
-        .iter()
-        .any(|m| essence == *m)
+    let Some(language) = language.filter(|language| !language.is_empty()) else { return true };
+    // The browser matches `text/<language>` directly for a legacy language value.
+    JAVASCRIPT_MIME_TYPES.iter().filter_map(|m| m.strip_prefix("text/")).any(|m| m.eq_ignore_ascii_case(language))
 }
 
 #[cfg(test)]

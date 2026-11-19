@@ -1126,12 +1126,13 @@ impl CraftApp {
             }
             ("web_site_sign_in", Ok(v)) => {
                 let (words, warn) = make::sign_in_words(&v);
-                self.toast(tr(words), warn);
+                self.toast(words, warn);
             }
             // "Stop waiting" before the window was up (or while another tool held the session).
             ("web_site_sign_in", Err(e)) if e.code == ErrorCode::Cancelled => self.toast(tr("Stopped the sign-in."), false),
             ("web_site_sign_in", Err(e)) if !clean_room::is_refusal(&e) => {
-                self.toast(format!("{} {}", tr("Couldn't sign in to the site."), e.for_people()), true);
+                let failed = tr("Couldn't sign in to the site.");
+                self.toast(format!("{failed} {}", e.for_people()), true);
             }
             ("project_open_folder", Err(e)) => self.toast(format!("{} {}", tr("Couldn't open the folder."), e.message), true),
             (

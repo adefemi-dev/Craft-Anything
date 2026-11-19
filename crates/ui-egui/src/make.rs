@@ -435,8 +435,8 @@ fn sign_in(app: &mut CraftApp, ui: &mut Ui, url: Option<&str>) {
             }
         } else if let Some(url) = url {
             ui.label(RichText::new(tr("Does the site show more once you're signed in?")).size(theme::SMALL).color(t.text_dim));
-            let hint = "A browser window opens: sign in there yourself, then close it. Craft Anything never sees your password. The sign-in is kept on this computer and used when this site is studied.";
-            if widgets::secondary(ui, None, "Sign in to this site").on_hover_text(tr(hint)).clicked() {
+            let hint = tr("A browser window opens: sign in there yourself, then close it. Craft Anything never sees your password. The sign-in is kept on this computer and used when this site is studied.");
+            if widgets::secondary(ui, None, "Sign in to this site").on_hover_text(hint).clicked() {
                 app.sign_in_to_site(url);
             }
         }
@@ -445,16 +445,16 @@ fn sign_in(app: &mut CraftApp, ui: &mut Ui, url: Option<&str>) {
 
 /// What to tell the person once a sign-in window has closed, from `web_site_sign_in`'s result,
 /// and whether it's a warning.
-pub fn sign_in_words(result: &serde_json::Value) -> (&'static str, bool) {
+pub fn sign_in_words(result: &serde_json::Value) -> (String, bool) {
     let check = &result["check"];
     match result["ended"].as_str() {
-        Some("timed_out") => ("The sign-in window was open too long, so it was closed. What it had saved is kept.", true),
-        Some("cancelled") => ("Stopped waiting for the sign-in window. What it had saved is kept.", false),
+        Some("timed_out") => (tr("The sign-in window was open too long, so it was closed. What it had saved is kept."), true),
+        Some("cancelled") => (tr("Stopped waiting for the sign-in window. What it had saved is kept."), false),
         _ if check["sign_in_page"].as_bool() == Some(true) => {
-            ("Your sign-in was saved, but the site still asks you to sign in. Sign in again and choose \"remember me\" if the site offers it.", true)
+            (tr("Your sign-in was saved, but the site still asks you to sign in. Sign in again and choose \"remember me\" if the site offers it."), true)
         }
-        _ if check["done"].as_bool() != Some(true) => ("Your sign-in was saved, but opening the site again to check it didn't work.", true),
-        _ => ("Signed in. Studies of this site now see it as you do.", false),
+        _ if check["done"].as_bool() != Some(true) => (tr("Your sign-in was saved, but opening the site again to check it didn't work."), true),
+        _ => (tr("Signed in. Studies of this site now see it as you do."), false),
     }
 }
 
@@ -664,7 +664,7 @@ mod tests {
         use serde_json::json;
         let checked = |sign_in_page: bool| json!({"done": true, "sign_in_page": sign_in_page, "error": null});
         let words = |ended: &str, check: serde_json::Value| sign_in_words(&json!({"saved": true, "ended": ended, "check": check}));
-        assert_eq!(words("closed", checked(false)), ("Signed in. Studies of this site now see it as you do.", false));
+        assert_eq!(words("closed", checked(false)), ("Signed in. Studies of this site now see it as you do.".to_string(), false));
         let (still_asks, warn) = words("closed", checked(true));
         assert!(warn && still_asks.contains("still asks you to sign in"), "{still_asks}");
         let (unchecked, warn) = words("closed", json!({"done": false, "sign_in_page": null, "error": "the browser closed"}));

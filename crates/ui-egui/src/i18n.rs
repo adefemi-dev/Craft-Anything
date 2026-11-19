@@ -36,6 +36,7 @@ pub static LANGUAGES: &[LangInfo] = &[
     LangInfo { code: "tr", name: "Türkçe", source: include_str!("i18n/tr.tsv") },
     LangInfo { code: "th", name: "ไทย", source: include_str!("i18n/th.tsv") },
     LangInfo { code: "et", name: "Eesti", source: include_str!("i18n/et.tsv") },
+    LangInfo { code: "he", name: "עברית", source: include_str!("i18n/he.tsv") },
 ];
 
 /// Match a locale to a registered UI language. An explicit script wins over the region.
@@ -45,7 +46,10 @@ pub fn language_from_tag(tag: &str) -> Option<&'static str> {
         return Some(lang.code);
     }
     let mut parts = tag.split('-');
-    let primary = parts.next()?;
+    let primary = match parts.next()? {
+        "iw" => "he",
+        other => other,
+    };
     match primary {
         "zh" => {
             let parts: Vec<_> = parts.take_while(|p| p.len() != 1).collect();
@@ -109,6 +113,18 @@ pub fn language() -> String {
     current().read().map(|g| g.0.clone()).unwrap_or_else(|_| "en".into())
 }
 
+/// Whether `code` names a right-to-left language (accepting legacy `iw` tags as Hebrew).
+pub fn is_rtl_code(code: &str) -> bool {
+    let tag = code.trim().split(['.', '@']).next().unwrap_or_default().replace('_', "-").to_ascii_lowercase();
+    let base = tag.split('-').next().unwrap_or("");
+    matches!(base, "ar" | "dv" | "fa" | "he" | "iw" | "ku" | "ps" | "sd" | "ug" | "ur" | "yi")
+}
+
+/// Whether the active UI language uses right-to-left script direction.
+pub fn is_rtl() -> bool {
+    is_rtl_code(&language())
+}
+
 /// Translate a UI string.
 pub fn tr(s: &str) -> String {
     match current().read() {
@@ -165,6 +181,15 @@ mod tests {
         assert_eq!(language_from_tag("tr-TR"), Some("tr"));
         assert_eq!(language_from_tag("th-TH"), Some("th"));
         assert_eq!(language_from_tag("th_TH.UTF-8"), Some("th"));
+        assert_eq!(language_from_tag("he"), Some("he"));
+        assert_eq!(language_from_tag("he-IL"), Some("he"));
+        assert_eq!(language_from_tag("iw"), Some("he"));
+        assert_eq!(language_from_tag("iw-IL"), Some("he"));
+        assert_eq!(language_from_tag("iw_IL.UTF-8"), Some("he"));
+        assert!(is_rtl_code("he"));
+        assert!(is_rtl_code("iw"));
+        assert!(is_rtl_code("iw-IL"));
+        assert!(!is_rtl_code("en"));
         assert_eq!(preferred_language(["de-DE", "zh-HK"]), "de");
         assert_eq!(preferred_language(["sv-SE", "vi-VN", "en-US"]), "vi");
         assert_eq!(preferred_language(["en-US", "zh-CN"]), "en");
@@ -184,7 +209,7 @@ mod tests {
         let mut catalogs = Vec::new();
         for lang in LANGUAGES
             .iter()
-            .filter(|l| matches!(l.code, "zh-hans" | "zh-hant" | "ru" | "ko" | "cs" | "de" | "ka" | "es" | "it" | "vi" | "pt-br" | "tr" | "th" | "et"))
+            .filter(|l| matches!(l.code, "zh-hans" | "zh-hant" | "ru" | "ko" | "cs" | "de" | "ka" | "es" | "it" | "vi" | "pt-br" | "tr" | "th" | "et" | "he"))
         {
             let mut keys = std::collections::BTreeSet::new();
             for (i, line) in lang.source.lines().enumerate() {

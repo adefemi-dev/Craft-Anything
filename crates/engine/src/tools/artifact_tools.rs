@@ -92,7 +92,8 @@ pub(crate) struct WalkedFile {
 
 #[derive(Debug, Default)]
 pub(crate) struct Walked {
-    /// Sorted by relative path, folder by folder ([`path_order`]).
+    /// Sorted by the raw relative path, folder by folder: a cut is a prefix of the whole walk even
+    /// when two names read the same after `to_string_lossy`.
     pub files: Vec<WalkedFile>,
     pub dirs: Vec<String>,
     pub links: Vec<String>,
@@ -330,7 +331,9 @@ fn list_within(
             }
         }
     }
-    out.names.sort();
+    // The raw names decide the order, not the text `to_string_lossy` shows: two names can read
+    // alike, or sort differently as text, and a file cap must keep the earlier raw name.
+    out.names.sort_by(|a, b| a.1.cmp(&b.1));
     Ok(out)
 }
 
@@ -373,6 +376,12 @@ fn report_unread(out: &mut Walked, frame: &Frame) {
 /// (`-` and `.` sort before `/`).
 pub(crate) fn path_order(a: &str, b: &str) -> std::cmp::Ordering {
     a.split('/').cmp(b.split('/'))
+}
+
+/// The path a walk sorts by: `file` relative to the walk's root, raw components and all, so names
+/// that `to_string_lossy` shows alike still order by what they are.
+fn raw_rel<'a>(root: &Path, file: &'a WalkedFile) -> &'a Path {
+    file.abs.strip_prefix(root).unwrap_or(file.abs.as_path())
 }
 
 /// [`walk_dir_within`], taking each folder's entry names from `read_dir`: the system's listing, or
@@ -487,7 +496,9 @@ fn walk_dir_reading<I: Iterator<Item = std::io::Result<std::ffi::OsString>>>(
     for frame in &frames {
         report_unread(&mut out, frame);
     }
-    out.files.sort_by(|a, b| path_order(&a.rel, &b.rel));
+    // The raw path decides the order, as it does while walking: the displayed `rel` can read the
+    // same for two different folders, and sorting by it would make a cut drop an earlier raw file.
+    out.files.sort_by(|a, b| raw_rel(root, a).cmp(raw_rel(root, b)));
     Ok(out)
 }
 
@@ -1300,6 +1311,47 @@ mod tests {
         assert_eq!(path_order("a", "a/first.txt"), std::cmp::Ordering::Less);
         assert_eq!(path_order("a/first.txt", "a-b.txt"), std::cmp::Ordering::Less);
         assert_eq!(path_order("a/z", "a.txt"), std::cmp::Ordering::Less);
+    }
+
+    /// A folder's entries are ordered by their raw names, not by the text `to_string_lossy` gives:
+    /// `a\x80.txt` and `aé.txt` read as `a�.txt` and `aé.txt`, so sorting by the text put `aé`
+    /// first and a file cap kept it, dropping the earlier raw name (CodeRabbit on #2101).
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_walk_orders_names_by_their_raw_bytes() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = std::ffi::OsString::from_vec(b"a\x80.txt".to_vec());
+        std::fs::write(dir.path().join(&invalid), b"invalid").unwrap();
+        std::fs::write(dir.path().join("aé.txt"), b"valid").unwrap();
+        let w = walk(dir.path(), 1, ROOMY);
+        assert_eq!(w.files.len(), 1, "the file cap keeps one");
+        assert_eq!(w.files[0].abs.file_name(), Some(invalid.as_os_str()), "the raw name that sorts first is kept");
+        assert_eq!(w.files[0].rel, invalid.to_string_lossy().to_string(), "and it is shown lossily");
+    }
+
+    /// Two folders that read the same after `to_string_lossy` are still two subtrees. The walk's
+    /// files must be ordered by their raw paths, or a one-file cut keeps the first subtree's later
+    /// file where a prefix of the whole walk would keep the second subtree's earlier one
+    /// (CodeRabbit on #2101).
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_walk_is_a_prefix_when_two_folders_read_alike() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let first = std::ffi::OsString::from_vec(b"a\x80".to_vec());
+        let second = std::ffi::OsString::from_vec(b"a\x81".to_vec());
+        std::fs::create_dir(dir.path().join(&first)).unwrap();
+        std::fs::create_dir(dir.path().join(&second)).unwrap();
+        std::fs::write(dir.path().join(&first).join("z.txt"), b"z").unwrap();
+        std::fs::write(dir.path().join(&second).join("a.txt"), b"a").unwrap();
+        let shown = first.to_string_lossy().into_owned();
+        let rels_of = |w: &Walked| w.files.iter().map(|f| f.rel.clone()).collect::<Vec<_>>();
+        let capped = walk(dir.path(), 1, ROOMY);
+        assert_eq!(rels_of(&capped), vec![format!("{shown}/z.txt")], "the first raw subtree is kept");
+        let whole = walk(dir.path(), 10, ROOMY);
+        assert_eq!(rels_of(&whole), vec![format!("{shown}/z.txt"), format!("{shown}/a.txt")], "raw folder order, not the displayed name");
+        assert_eq!(&rels_of(&whole)[..1], &rels_of(&capped)[..], "the cut walk is a prefix of the whole one");
     }
 
     /// A folder's inventory used to add every folder and link before any file, so a small

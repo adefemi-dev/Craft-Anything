@@ -2322,11 +2322,19 @@ Owner: open · Status: in progress
       folder's own listing is cut by the entry or path-byte limit, the names kept are the ones the
       system returned first, which only NTFS returns in name order
       — claimed: hichang4u, branch bugfix/r3.11-walk-path-order
-- [ ] A walk names entries by `to_string_lossy`, so on Unix two folders whose raw names differ only
-      in bytes that aren't UTF-8 (`a\x80`, `a\x81`) both read as `a�`: they are walked as two
-      folders but sorted as one path, so a cut walk can keep a later file and drop an earlier one
-      (CodeRabbit on #2101). Order by the raw name, or report a name that can't be shown
-      unambiguously as unlisted
+- [x] A walk named entries by `to_string_lossy`, so on Unix two folders whose raw names differed
+      only in bytes that aren't UTF-8 (`a\x80`, `a\x81`) both read as `a�`: they were walked as
+      two folders but sorted as one path, so a cut walk could keep a later file and drop an earlier
+      one (CodeRabbit on #2101). Each folder's entries are now ordered by their raw names before
+      the file and depth limits, and the walk's files are ordered by their raw relative paths, so a
+      lossy collision or a text order that differs from the raw one can't make a cut keep a later
+      file and drop an earlier one; relative paths, folders, links and unlisted names are still
+      shown lossily
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.11-walk-raw-names
+- [ ] A folder inventory re-sorts the walk's folders, links and files by their displayed paths, so
+      a `max_entries` cut can keep the display-first file where the walk's raw order keeps an
+      earlier one: give its entries the same raw identities the walk now uses (follow-up to the
+      walk's raw order)
 
 ### R3.12 Format parser correctness
 Owner: open · Status: in progress

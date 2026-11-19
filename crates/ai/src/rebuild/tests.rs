@@ -62,6 +62,75 @@ fn stack_choice() {
     assert_eq!(kind_of("Copy this tool", &folder, "Rust + egui (eframe)"), "app", "the app stack stays an app");
 }
 
+/// R2.7: a game naming a technology from the stack table's list starts without its default engine
+/// only when that engine isn't here and nothing else was named.
+#[test]
+fn a_listed_technology_replaces_a_missing_default_engine_only() {
+    use game::Builder::{Godot, Rust, Unity};
+    let kinds = KindRegistry::built_in();
+    let skip = |request: &str, engine: game::Builder, ready: bool| {
+        project::listed_tech_instead(&kinds, request, &TargetRef::None, engine, |_| ready).map(|s| (s.engine, s.named))
+    };
+    assert_eq!(skip("Make a space shooter game using Three.js", Unity, false), Some((Unity, "Three.js")));
+    assert_eq!(skip("Make a platformer game with PixiJS", Unity, false), Some((Unity, "PixiJS")));
+    assert_eq!(skip("Make a snake game with Pygame", Unity, false), Some((Unity, "Pygame")));
+    assert_eq!(skip("Make a continue-screen game with WebGL", Unity, false), Some((Unity, "WebGL")), "\"ue\" inside a word isn't Unreal");
+    assert_eq!(
+        skip("Remake this game in Babylon.js", Godot, false),
+        Some((Godot, "Babylon.js")),
+        "a default other than Unity (the app's from the original's files) is skipped the same way"
+    );
+    assert_eq!(skip("Make a space shooter game using Three.js", Unity, true), None, "the default engine is here");
+    assert_eq!(
+        skip("Make a game with WebGL", game::Builder::Unreal, true),
+        None,
+        "installed counts, ready or not: Unreal without its C++ tools keeps its own setup (the callers ask `best`, not `ready`)"
+    );
+    for request in ["Make a space shooter game", "Make a tower defense game with zombies", "Make a game using the arrow keys to move"] {
+        assert_eq!(skip(request, Unity, false), None, "{request}: names nothing, so the engine is still offered");
+    }
+    assert_eq!(skip("Make a game in Godot using Three.js", Unity, false), None, "a named engine wins, installed or not");
+    assert_eq!(skip("Make a game with Unity and WebGL", Unity, false), None);
+    for request in [
+        "Make a Unity WebGL game",
+        "Make a Unity3D game with WebGL",
+        "Make a Unity2D platformer game with WebGL",
+        "Make a Phaser3 game with WebGL",
+        "Make a Godot HTML5 game",
+        "Make a Godot4 game with WebGL",
+        "Make an Unreal Engine 5 game with three.js",
+        "Make a UE5 game with WebGL",
+        "an unreal game in WebGL",
+        "Make a Phaser game with WebGL",
+        "Make a Rust game with SDL",
+    ] {
+        assert_eq!(skip(request, Unity, false), None, "{request}: an engine or game stack named any way leaves main's choice alone");
+    }
+    assert_eq!(skip("Make my own version with Three.js", Unity, false), None, "only a request that reads as a game");
+    assert_eq!(skip("Make a game in Phaser with WebGL", Unity, false), None, "a named stack from the table wins");
+    assert_eq!(skip("Make a Python snake game with Pygame", Unity, false), Some((Unity, "Pygame")), "a stack only as a word: the builder uses what's named");
+    assert_eq!(skip("Make a snake game in Python with Pygame", Unity, false), None);
+    assert_eq!(skip("Make a game with SDL", Rust, false), None, "Rust needs no editor");
+    let mut asked = false;
+    let _ = project::listed_tech_instead(&kinds, "Make a space shooter game", &TargetRef::None, Unity, |_| {
+        asked = true;
+        false
+    });
+    assert!(!asked, "the computer isn't searched for engines when nothing on the list is named");
+}
+
+#[test]
+fn the_skipped_engine_notice_says_how_to_get_it_back() {
+    let s = project::EngineSkipped { engine: game::Builder::Unity, named: "Three.js" };
+    assert_eq!(
+        s.notice(),
+        "Unity isn't installed, so this game is built with what your request names (Three.js) instead. To build it with Unity, get Unity (Settings → Engines in the app) and start a new project with \"Build with\" set to Unity (`--build-with unity` in the CLI)."
+    );
+    let s = project::EngineSkipped { engine: game::Builder::Unreal, named: "WebGL" };
+    assert!(s.notice().contains("`--build-with unreal`"), "{}", s.notice());
+    assert!(project::build_with("unreal").is_ok(), "the id the notice names is one --build-with takes");
+}
+
 #[test]
 fn the_word_player_alone_is_not_a_game() {
     for request in [
@@ -1883,6 +1952,60 @@ mod picking_up_a_build {
         let _ = try_it(&b, &ws);
         let keys = b.hub.engine.session().ext.get::<craft_anything_engine::tools::asset_tools::AssetKeys>().unwrap_or_default();
         assert_eq!(keys.get("fal"), Some("k-1"));
+    }
+
+    /// R2.7: run a new game from `request` until it says a step or ends; the stop or notice it gave
+    /// and the stack it saved. None when the engine is installed here, where the case can't be shown.
+    fn start_game(b: &Bench, request: &str, engine: game::Builder) -> Option<(String, String)> {
+        let store = b.hub.engine.session().settings.engine_store_dir();
+        if game::inventory(&game::Places::here(store)).ready(engine) {
+            eprintln!("{} is installed here: skipped", engine.name());
+            return None;
+        }
+        let ws = Workspace::create(&b.projects, "g", request, TargetRef::None).unwrap();
+        let opts = RunOptions { backend: Some("Stand-in".into()), ..RunOptions::default() };
+        let run = RebuildRun::start(&b.hub, Workspace::open(&ws.root).unwrap(), opts).unwrap();
+        let began = Instant::now();
+        let said = loop {
+            assert!(began.elapsed() < Duration::from_secs(30), "the run said nothing");
+            match run.rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(RunEvent::Step { text, .. }) if text.contains("isn't installed") || text.contains("isn't ready") => break text,
+                Ok(RunEvent::Finished { message, .. }) => break message,
+                Ok(_) => {}
+                Err(e) => panic!("the run went away: {e}"),
+            }
+        };
+        run.stop();
+        while !matches!(run.rx.recv_timeout(Duration::from_secs(30)), Ok(RunEvent::Finished { .. }) | Err(_)) {}
+        Some((said, Workspace::open(&ws.root).unwrap().manifest.stack))
+    }
+
+    #[test]
+    fn a_game_naming_a_listed_technology_starts_without_the_missing_engine() {
+        let b = bench();
+        let Some((said, stack)) = start_game(&b, "Make a space shooter game using Three.js", game::Builder::Unity) else { return };
+        assert_eq!(stack, stacks::BUILDERS_CHOICE);
+        assert!(said.starts_with("Unity isn't installed, so this game is built with what your request names (Three.js) instead."), "{said}");
+        let journal = std::fs::read_dir(Workspace::open(&b.projects.join("g")).unwrap().investigation_dir().join("journal"))
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect::<String>();
+        assert!(journal.contains(r#""action":"engine_skipped""#) && journal.contains(r#""named":"Three.js""#), "{journal}");
+    }
+
+    #[test]
+    fn a_named_engine_or_a_game_naming_nothing_still_stops_for_its_engine() {
+        let b = bench();
+        if let Some((said, stack)) = start_game(&b, "Make a game in Godot using Three.js", game::Builder::Godot) {
+            assert_eq!(stack, "Godot");
+            assert!(said.contains("Godot isn't ready on this computer yet"), "{said}");
+        }
+        let b = bench();
+        if let Some((said, stack)) = start_game(&b, "Make a space shooter game", game::Builder::Unity) {
+            assert_eq!(stack, "Unity");
+            assert!(said.contains("Unity isn't ready on this computer yet"), "{said}");
+        }
     }
 
     fn try_it(b: &Bench, ws: &Workspace) -> (bool, Vec<feed::FeedItem>) {

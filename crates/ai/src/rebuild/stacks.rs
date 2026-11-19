@@ -62,12 +62,24 @@ pub struct Library {
     pub steps: String,
 }
 
+/// A game technology the table has no stack for (Three.js, Pygame…): naming one lets a new game
+/// start without its default engine when that engine isn't on this computer (R2.7).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct GameTech {
+    /// Shown to the person ("Three.js").
+    pub name: String,
+    /// Phrases that name it, matched like [`Stack::asked_by`], as whole words.
+    pub said_as: Vec<String>,
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 struct Table {
     #[serde(default)]
     stack: Vec<Stack>,
     #[serde(default)]
     library: Vec<Library>,
+    #[serde(default)]
+    game_tech: Vec<GameTech>,
 }
 
 /// The built-in table. A table that doesn't parse (a broken edit) leaves it empty, so every
@@ -108,6 +120,12 @@ pub fn missing_program(stack: &str, have: impl Fn(&str) -> bool) -> Option<(&'st
 pub fn resolve(name: &str) -> Option<&'static Stack> {
     let n = name.trim();
     catalogue().iter().find(|s| s.name.eq_ignore_ascii_case(n) || s.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(n)))
+}
+
+/// The first game technology from the table's list that `words` (a request through [`words`])
+/// names, if any.
+pub fn game_tech_named(words: &str) -> Option<&'static GameTech> {
+    table().game_tech.iter().find(|t| t.said_as.iter().any(|p| words.contains(p.as_str())))
 }
 
 /// The first stack whose phrases appear in `words` (a request through [`words`]).
@@ -292,6 +310,65 @@ mod tests {
             assert_eq!(resolve(name), Some(stack));
         }
         assert!(asked_for(&words("a game with a phaser cannon")).is_none());
+    }
+
+    #[test]
+    fn listed_game_tech_matches_whole_words_and_common_spellings() {
+        let named = |r: &str| game_tech_named(&words(r)).map(|t| t.name.as_str());
+        for (name, spellings) in [
+            ("Three.js", &["three.js", "ThreeJS", "Three JS", "THREE.JS", "(three.js)"][..]),
+            ("Babylon.js", &["Babylon.js", "BabylonJS", "babylon js"]),
+            ("PixiJS", &["PixiJS", "pixi.js", "Pixi JS"]),
+            ("PlayCanvas", &["PlayCanvas"]),
+            ("Kaboom.js", &["Kaboom.js", "KaboomJS", "KAPLAY"]),
+            ("Excalibur.js", &["Excalibur.js", "ExcaliburJS"]),
+            ("raylib", &["raylib", "Raylib"]),
+            ("LÖVE", &["LÖVE", "löve", "Love2D", "LOVE2D", "Löve2D"]),
+            ("Pygame", &["Pygame", "pygame"]),
+            ("MonoGame", &["MonoGame"]),
+            ("libGDX", &["libGDX", "LibGdx"]),
+            ("SDL", &["SDL", "SDL2", "SDL 3", "sdl3"]),
+            ("SFML", &["SFML"]),
+            ("HTML5", &["HTML5", "HTML 5", "an HTML5-style retro game"]),
+            ("WebGL", &["WebGL", "webgl"]),
+            ("p5.js", &["p5.js", "P5JS"]),
+            ("Pyxel", &["Pyxel"]),
+            ("Ebitengine", &["Ebitengine", "Ebiten"]),
+            ("HaxeFlixel", &["HaxeFlixel"]),
+        ] {
+            for s in spellings {
+                assert_eq!(named(&format!("Make a space shooter game with {s}")), Some(name), "{s}");
+            }
+        }
+        // Words that only look like one, or mean something ordinary, name none.
+        for r in [
+            "Make a space shooter game",
+            "a game I'd love to play",
+            "made with love",
+            "a platform game, I love 2D art",
+            "a game I manage with pixi",
+            "a strategy game set in ancient Babylon",
+            "a game where you pull Excalibur from the stone",
+            "a game where the bombs go kaboom",
+            "a pixel-art platformer",
+            "a canvas painting game",
+            "a game about the SDLC",
+            "a three jump platformer",
+            "a game with zombies",
+            "a game using the arrow keys to move",
+        ] {
+            assert_eq!(named(r), None, "{r}");
+        }
+        for t in &table().game_tech {
+            assert!(!t.name.is_empty() && !t.said_as.is_empty(), "{t:?}");
+            for p in &t.said_as {
+                assert!(p.starts_with(' ') && p.ends_with(' ') && *p == p.to_lowercase(), "{} phrase {p:?} must be whole lower-case words", t.name);
+            }
+            let named_in_table = catalogue()
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&t.name) || s.uses.iter().chain(&s.asked_by).any(|u| t.said_as.iter().any(|p| p.trim() == u.trim())));
+            assert!(!named_in_table, "{} has a stack in the table: it doesn't belong in the list", t.name);
+        }
     }
 
     #[test]

@@ -74,7 +74,10 @@ impl CraftApp {
         // Games are built with an engine, unless the request names another way to build; one that
         // isn't here yet is got first, then this starts.
         let game = make::is_game(&self.kinds, &draft);
-        let engine = if game { crate::engine_ui::chosen(&self.kinds, &draft) } else { None };
+        // A game naming a technology from the stack table's list, whose default engine isn't
+        // here, starts without it, as Make said (R2.7).
+        let skipped = if game { crate::engine_ui::skipped(&self.kinds, &draft, self.game_engines.as_ref()) } else { None };
+        let engine = if game && skipped.is_none() { crate::engine_ui::chosen(&self.kinds, &draft) } else { None };
         if let Some(b) = engine
             && !self.game_engines.as_ref().is_some_and(|i| i.ready(b))
         {
@@ -96,6 +99,9 @@ impl CraftApp {
         let own = draft.folder.as_deref().and_then(Path::file_name).filter(|_| draft.mine);
         let name = own.map_or_else(|| suggest_name(&request, &target), |n| n.to_string_lossy().into_owned());
         let (projects_dir, budget, generate) = (self.settings.projects_dir(), self.settings.assets.budget(), game && draft.generate_assets);
+        if let Some(s) = &skipped {
+            self.toast(crate::engine_ui::skipped_started(s), false);
+        }
         // The folder, its records and copies of the pictures are written on a worker (a slow or
         // network drive must not freeze the window); `created` starts the build.
         self.creating = Some(self.jobs.spawn(tr("Create the project"), false, move |_| {
@@ -108,8 +114,8 @@ impl CraftApp {
             let mut ws = created.map_err(|e| e.for_people())?;
             // A new project starts with the stack, asset budget and builder from Make; a folder
             // that already held one keeps what the person set there.
-            rebuild::project::apply_new_project_fields(&mut ws, attached, engine.map(|b| b.stack()), budget, generate, draft.ai.as_deref())
-                .map_err(|e| e.for_people())?;
+            let stack = if skipped.is_some() { Some(rebuild::stacks::BUILDERS_CHOICE) } else { engine.map(|b| b.stack()) };
+            rebuild::project::apply_new_project_fields(&mut ws, attached, stack, budget, generate, draft.ai.as_deref()).map_err(|e| e.for_people())?;
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);
             Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached })
         }));

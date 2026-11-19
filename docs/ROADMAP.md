@@ -1450,9 +1450,17 @@ Owner: open · Status: in progress
 Owner: open · Status: in progress
 - [x] Recognize Phaser and Bevy requests in the stack catalogue so Make can start those games without a Unity, Unreal or Godot editor.
       — claimed: Afloat16, branch feature/r2.7-phaser-bevy-game-stacks
-- [ ] Make: a game whose request names a technology the stack table doesn't know (Phaser, Bevy…)
+- [ ] Make: a game whose request names a technology the stack table doesn't know (Three.js, Pygame…)
       still needs the default engine installed to start, though the builder is told to use what
-      was named; ask the person, or let such a game start without an engine
+      was named; ask the person, or let such a game start without an engine. Partly done (below):
+      a technology on the `[[game_tech]]` list starts without the missing engine; one that isn't
+      listed still stops
+- [x] A new game whose request names a game technology from `[[game_tech]]` in `stacks.toml`
+      (Three.js, Pygame, raylib…) and no engine or stack, when its default engine isn't on this
+      computer, is built with "Builder's choice" instead of stopping, and the run and Make say
+      which engine was skipped and how to build with it. A request that names nothing, or names
+      an engine, still gets the engine
+      — claimed: Fadlalla-ai, branch bugfix/r2.7-listed-game-tech
 - [x] The website check's missing-site note names every place `site_dir` accepts (dist/, build/,
       out/, or a plain index.html with no package.json) and the app's real place, "app/" or "the
       project folder" (#494)

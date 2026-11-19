@@ -1586,6 +1586,7 @@ Gaps found while using the app for real projects.
 - [x] Change a project's builder from the CLI and MCP: `project_builder_set`, with `default`
       giving it back to the app's choice — PR #1833
 - [ ] Change a project's builder from its page, through that same tool (the app's own control)
+      — claimed: mansur-akhmadi, branch feature/r2.9-builder-from-project-page
 - [x] `chat --backend <a name that is turned off>` and `compare` refuse it before model or
       agent setup: `AiHub::start` checks `enabled` and says how to turn it on or choose another
       — PR #1008; claimed: Codex, branch bugfix/r2.9-disabled-chat-backend

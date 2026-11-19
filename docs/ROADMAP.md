@@ -1939,6 +1939,7 @@ Gaps found while using the app for real projects.
       operations fail fast while reserved, without blocking other sites or explicitly fresh opens.
 - [ ] A "Sign in to this site" button in the Make screen for website targets (`web_site_sign_in`
       is reachable only as a tool, from the CLI, MCP or the agent, today)
+      — claimed: mansur-akhmadi, branch feature/r2.9-make-site-sign-in
 - [ ] Study with the person's own already-running browser through its debugging endpoint, as an
       alternative to a saved sign-in
 - [ ] Sign in once with `web_site_sign_in` on a real site behind a login (and with the Ubuntu

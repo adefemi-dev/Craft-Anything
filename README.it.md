@@ -61,7 +61,7 @@ Ogni tool è anche un sub-command CLI e un tool MCP, così un agent può studiar
 ```bash
 craft-anything-cli commands # every tool, by toolset
 craft-anything-cli mcp # serve them to any MCP client
-craft-anything-cli rebuild [https://example.com](https://example.com) "Recreate this website"
+craft-anything-cli rebuild https://example.com "Recreate this website"
 ```
 
 I risultati sono record di evidence completi di confidence, coverage e limitazioni; quelli più voluminosi tornano indietro prima come summary e possono essere paginati con `core_evidence_browse`. `craft-anything-cli setup` connette Craft Anything alle app dei coding agent.
@@ -81,7 +81,7 @@ sudo apt-get install build-essential libxkbcommon-dev libxkbcommon-x11-0 libwayl
 Successivamente:
 
 ```bash
-git clone [https://github.com/storytold/craft-anything](https://github.com/storytold/craft-anything) && cd craft-anything
+git clone https://github.com/storytold/craft-anything && cd craft-anything
 cargo run --release -p craft-anything # the desktop app
 cargo install --path apps/craft-anything-cli # the CLI, as `craft-anything-cli`
 craft-anything-cli doctor # checks the install, coding agents and engines
@@ -90,9 +90,9 @@ craft-anything-cli doctor # checks the install, coding agents and engines
 Per le build serve un coding agent loggato sul computer (vedi [IA](#ia)); `doctor` indica cosa manca. Puoi avviare una rebuild da CLI (le domande vengono poste nel terminale):
 
 ```bash
-craft-anything-cli rebuild [https://example.com](https://example.com) "Recreate this website"
+craft-anything-cli rebuild https://example.com "Recreate this website"
 craft-anything-cli rebuild - "A snake game in Rust" --rounds 1
-craft-anything-cli rebuild [https://example.com](https://example.com) "Make the header blue" --continue-in "<project folder>"
+craft-anything-cli rebuild https://example.com "Make the header blue" --continue-in "<project folder>"
 craft-anything-cli rebuild - "Add a contact form" --project-folder "<your folder>" --existing edit
 ```
 

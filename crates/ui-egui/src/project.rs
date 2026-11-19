@@ -116,6 +116,10 @@ impl CraftApp {
             // that already held one keeps what the person set there.
             let stack = if skipped.is_some() { Some(rebuild::stacks::BUILDERS_CHOICE) } else { engine.map(|b| b.stack()) };
             rebuild::project::apply_new_project_fields(&mut ws, attached, stack, budget, generate, draft.ai.as_deref()).map_err(|e| e.for_people())?;
+            // The run finds the stack already set, so the skip is recorded here, as the run would.
+            if let Some(s) = skipped.filter(|_| !attached) {
+                s.journal(&ws.root);
+            }
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);
             Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached })
         }));
@@ -853,10 +857,16 @@ impl CraftApp {
     }
 }
 
+/// Whether a project is built as a game, so its pictures and models may be generated: the kind the
+/// run picks, whatever the stack (an engine, or Builder's choice for a game naming Three.js, R2.7).
+fn builds_a_game(kinds: &KindRegistry, m: &craft_anything_engine::workspace::Manifest) -> bool {
+    kinds.detect(&m.request, &m.target, &m.stack).is_some_and(|k| k.id() == craft_anything_ai::rebuild::GameKind::ID)
+}
+
 /// A game project's generated-assets switch, and "7 · $2.10 of $5.00" once it's on or assets were made.
 fn asset_line(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
     let t = Tokens::get(ui.ctx());
-    if craft_anything_engines::game::Builder::from_stack(&ws.manifest.stack).is_none() {
+    if !builds_a_game(&app.kinds, &ws.manifest) {
         return;
     }
     widgets::caption(ui, "Generated assets");
@@ -983,7 +993,7 @@ fn side(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
     steps(app, ui, ws);
     ui.add_space(theme::space::LG);
     open_questions(app, ui);
-    if craft_anything_engines::game::Builder::from_stack(&m.stack).is_some() {
+    if builds_a_game(&app.kinds, m) {
         widgets::card(&t).inner_margin(theme::pad::ROW).show(ui, |ui| {
             ui.set_width(ui.available_width());
             asset_line(app, ui, ws);

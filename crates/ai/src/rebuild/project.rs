@@ -56,6 +56,13 @@ impl EngineSkipped {
             self.named
         )
     }
+
+    /// Records the skip in the journal of the project at `root`. The run does this when it picks the
+    /// stack, and the app does it when Make's Start creates the project with Builder's choice.
+    pub fn journal(&self, root: &Path) {
+        let entry = json!({"action": "engine_skipped", "engine": self.engine.name(), "named": self.named, "stack": stacks::BUILDERS_CHOICE});
+        craft_anything_engine::journal::append(root, "stack", entry);
+    }
 }
 
 /// Whether a new game whose stack would be its kind's default `engine`

@@ -867,8 +867,7 @@ impl Worker {
             if let Some(s) = skipped {
                 // A step line, so the CLI prints it and the feed keeps it where the stop used to be.
                 self.emit(RunEvent::Step { step: Step::Study, text: s.notice() });
-                self.engine
-                    .journal("stack", json!({"action": "engine_skipped", "engine": s.engine.name(), "named": s.named, "stack": stacks::BUILDERS_CHOICE}));
+                s.journal(&ws.root);
             }
         }
         let kind = opts.kinds.detect(&ws.manifest.request, &ws.manifest.target, &ws.manifest.stack).ok_or_else(no_kind)?;

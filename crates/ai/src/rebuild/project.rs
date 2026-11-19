@@ -57,11 +57,12 @@ impl EngineSkipped {
         )
     }
 
-    /// Records the skip in the journal of the project at `root`. The run does this when it picks the
-    /// stack, and the app does it when Make's Start creates the project with Builder's choice.
-    pub fn journal(&self, root: &Path) {
+    /// Records the skip in `ws`'s journal (in its investigation, where the run's own entries go). The
+    /// run does this when it picks the stack, and the app does it when Make's Start creates the
+    /// project with Builder's choice.
+    pub fn journal(&self, ws: &Workspace) {
         let entry = json!({"action": "engine_skipped", "engine": self.engine.name(), "named": self.named, "stack": stacks::BUILDERS_CHOICE});
-        craft_anything_engine::journal::append(root, "stack", entry);
+        craft_anything_engine::journal::append(&ws.investigation_dir(), "stack", entry);
     }
 }
 

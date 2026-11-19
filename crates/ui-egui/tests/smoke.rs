@@ -2897,8 +2897,11 @@ fn a_game_started_from_make_without_its_engine_journals_the_skip() {
     assert!(wait(&mut h, |a| a.creating.is_none() && a.workspace.is_some()), "made on a worker");
     let root = h.state().workspace.as_ref().unwrap().root.clone();
     assert_eq!(Workspace::open(&root).unwrap().manifest.stack, "Builder's choice");
-    let journal: String = journal::days(&root).iter().flat_map(|day| journal::read_day(&root, day)).map(|v| v.to_string()).collect();
-    assert!(journal.contains(r#""action":"engine_skipped""#) && journal.contains(r#""named":"Three.js""#), "{journal}");
+    // Where the run's own entries go, and where `core_journal_read` reads them.
+    let inv = Workspace::open(&root).unwrap().investigation_dir();
+    let entries: Vec<String> = journal::days(&inv).iter().flat_map(|day| journal::read_day(&inv, day)).map(|v| v.to_string()).collect();
+    let skips: Vec<&String> = entries.iter().filter(|e| e.contains(r#""action":"engine_skipped""#)).collect();
+    assert!(skips.len() == 1 && skips[0].contains(r#""named":"Three.js""#), "{entries:?}");
     h.state_mut().pause();
     assert!(runs.finish(&root));
     h.run_steps(2);

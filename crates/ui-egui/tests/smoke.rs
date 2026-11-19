@@ -3103,6 +3103,161 @@ fn a_turned_off_or_removed_saved_builder_says_who_builds_instead() {
     assert_eq!(h.state().state.toasts.len(), quiet, "no replacement notice when nothing was replaced");
 }
 
+/// The project's page in a test: `Local` is set up in the app and its settings; the demo's
+/// `Claude` is only in the app's list, so the tool refuses it as an AI that was removed meanwhile.
+fn project_page(builder: Option<&str>, found: bool) -> (tempfile::TempDir, std::path::PathBuf, Harness<'static, CraftApp>) {
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+    ws.set_person(|m| m.builder = builder.map(str::to_string)).unwrap();
+    let root = ws.root.clone();
+    let h = harness(move || {
+        // The app's engine has the AI layer's tools, as the shipped app's does.
+        let settings = craft_anything_engine::Settings { mode: Mode::Beginner, first_run_done: true, language: "en".into(), ..Default::default() };
+        let mut a = demo::app(craft_anything_engine::Engine::shared(craft_anything_engine::Session::new(settings), craft_anything_ai::tools()));
+        let local = BackendConfig {
+            name: "Local".into(),
+            kind: BackendKind::OpenaiCompatible,
+            model: "m".into(),
+            base_url: Some("http://127.0.0.1:0/v1".into()),
+            ssh_host: None,
+            enabled: true,
+        };
+        a.hub.add_backend(local.clone(), None).unwrap();
+        a.backends.push(local);
+        a.detected = Some(if found { demo::detected() } else { Vec::new() });
+        a.workspace = Some(ws);
+        a.state.screen = Screen::Project;
+        a
+    });
+    (d, root, h)
+}
+
+fn saved_builder(root: &std::path::Path) -> Option<String> {
+    craft_anything_engine::workspace::Workspace::open(root).unwrap().manifest.builder
+}
+
+/// R2.9: a project's page says which AI builds its next changes, and a pick there is saved in
+/// the project through project_builder_set; Automatic gives it back to the app's choice.
+#[test]
+fn a_projects_builder_is_changed_from_its_page() {
+    let (_d, root, mut h) = project_page(None, false);
+    h.run_steps(2);
+    h.get_by_value("Automatic (Claude)").click();
+    h.run();
+    h.get_by_label("Local").click();
+    assert!(
+        wait(&mut h, |a| saved_builder(&root).as_deref() == Some("Local") && a.jobs.running().next().is_none()),
+        "saved in the project: {:?}",
+        h.state().state.toasts
+    );
+    h.run_steps(2);
+    h.get_by_value("Local");
+    assert!(h.state().state.toasts.iter().all(|(_, err)| !*err), "{:?}", h.state().state.toasts);
+    // Automatic clears the project's own choice.
+    h.get_by_value("Local").click();
+    h.run();
+    h.get_by_label("Automatic (Claude)").click();
+    assert!(wait(&mut h, |a| saved_builder(&root).is_none() && a.workspace.as_ref().is_some_and(|w| w.manifest.builder.is_none())));
+    h.run_steps(2);
+    h.get_by_value("Automatic (Claude)");
+}
+
+/// A choice the tool refuses (here an AI the settings no longer have) leaves the project's
+/// builder as it was, on disk and on the page, and says why.
+#[test]
+fn a_refused_builder_keeps_the_projects_choice() {
+    let (_d, root, mut h) = project_page(Some("Local"), false);
+    h.run_steps(2);
+    h.get_by_value("Local").click();
+    h.run();
+    h.get_by_label("Claude").click();
+    assert!(wait(&mut h, |a| a.state.toasts.iter().any(|(t, err)| *err && t.contains("Claude"))), "the refusal is shown: {:?}", h.state().state.toasts);
+    assert!(wait(&mut h, |a| a.workspace.as_ref().is_some_and(|w| w.manifest.builder.as_deref() == Some("Local"))), "the page shows the saved choice again");
+    assert_eq!(saved_builder(&root).as_deref(), Some("Local"));
+    h.run_steps(2);
+    h.get_by_value("Local");
+}
+
+/// A refused choice shows what the project has saved by then, also when something else changed it.
+#[test]
+fn a_refused_builder_shows_the_choice_saved_meanwhile() {
+    let (_d, root, mut h) = project_page(Some("Local"), false);
+    h.run_steps(2);
+    let mut ws = craft_anything_engine::workspace::Workspace::open(&root).unwrap();
+    ws.set_person(|m| m.builder = Some("Gone".into())).unwrap();
+    h.get_by_value("Local").click();
+    h.run();
+    h.get_by_label("Claude").click();
+    assert!(wait(&mut h, |a| a.jobs.running().next().is_none() && a.state.toasts.iter().any(|(_, err)| *err)), "{:?}", h.state().state.toasts);
+    assert_eq!(h.state().workspace.as_ref().unwrap().manifest.builder.as_deref(), Some("Gone"));
+}
+
+/// A refused choice isn't shown even when the project can't be read back.
+#[test]
+fn a_refused_builder_is_not_shown_when_the_project_wont_reload() {
+    let (_d, root, mut h) = project_page(Some("Local"), false);
+    h.run_steps(2);
+    std::fs::write(root.join(craft_anything_engine::workspace::MANIFEST), "not json").unwrap();
+    h.get_by_value("Local").click();
+    h.run();
+    h.get_by_label("Claude").click();
+    assert!(wait(&mut h, |a| a.jobs.running().next().is_none() && a.state.toasts.iter().any(|(_, err)| *err)), "{:?}", h.state().state.toasts);
+    assert_eq!(h.state().workspace.as_ref().unwrap().manifest.builder.as_deref(), Some("Local"));
+    h.run_steps(2);
+    h.get_by_value("Local");
+}
+
+/// An AI named like Automatic's keyword isn't offered: the tool would save Automatic instead.
+#[test]
+fn an_ai_named_default_is_not_offered_for_a_project() {
+    let (_d, _root, mut h) = project_page(None, false);
+    let mut named = h.state().backends[0].clone();
+    named.name = "DEFAULT".into();
+    h.state_mut().backends.push(named);
+    h.run_steps(2);
+    h.get_by_value("Automatic (Claude)").click();
+    h.run();
+    h.get_by_label("Local");
+    assert!(h.query_by_label("DEFAULT").is_none());
+}
+
+/// A saved builder that was removed shows Automatic and who builds instead, without changing
+/// what the project saved.
+#[test]
+fn a_removed_project_builder_shows_who_builds_instead() {
+    let (_d, root, mut h) = project_page(Some("Gone"), false);
+    h.run_steps(2);
+    h.get_by_value("Automatic (Claude)");
+    h.get_by_label_contains("The AI chosen for this project (Gone) is turned off or no longer set up. Claude builds instead.");
+    assert_eq!(saved_builder(&root).as_deref(), Some("Gone"));
+}
+
+/// An agent app only found on this computer is set up when it's picked, then saved.
+#[test]
+fn a_found_agent_picked_on_a_project_page_is_set_up_and_saved() {
+    let (_d, root, mut h) = project_page(None, true);
+    h.run_steps(2);
+    h.get_by_value("Automatic (Claude)").click();
+    h.run();
+    h.get_by_label("Claude Code").click();
+    assert!(wait(&mut h, |a| saved_builder(&root).as_deref() == Some("Claude Code") && a.jobs.running().next().is_none()), "{:?}", h.state().state.toasts);
+    assert!(h.state().backends.iter().any(|b| b.name == "Claude Code" && b.enabled), "set up in the app");
+    h.run_steps(2);
+    h.get_by_value("Claude Code");
+    assert!(h.state().state.toasts.iter().all(|(_, err)| !*err), "{:?}", h.state().state.toasts);
+}
+
+/// Nothing can build: no "Built by" on the page (starting a build says how to set one up).
+#[test]
+fn a_project_page_without_a_builder_offers_no_choice() {
+    let (_d, _root, mut h) = project_page(None, false);
+    h.state_mut().backends.clear();
+    h.run_steps(2);
+    h.get_by_label("Open folder");
+    assert!(h.query_by_label("Built by").is_none());
+}
+
 #[test]
 fn with_nothing_to_build_with_start_offers_what_was_found_instead_of_a_dead_end() {
     use craft_anything_ui_egui::state::Modal;

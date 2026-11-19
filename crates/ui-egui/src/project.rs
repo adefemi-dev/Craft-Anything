@@ -968,6 +968,7 @@ fn side(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
         widgets::caption(ui, "Built with");
         ui.label(RichText::new(&m.stack).color(t.text_dim));
     }
+    crate::builders::project_built_by(app, ui, ws);
     // The one thing to do with it, as wide as the panel.
     if outcome(app).is_some() {
         ui.add_space(theme::space::LG);

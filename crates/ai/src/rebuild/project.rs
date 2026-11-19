@@ -34,6 +34,96 @@ pub(super) fn first_stack(kinds: &KindRegistry, ws: &Workspace, deep: bool) -> O
     found.map(|s| s.name.as_str()).or_else(|| kinds.choose(&m.request, &m.target, deep).map(|(_, stack)| stack))
 }
 
+/// A new game built with the builder's choice instead of its default engine: the request names a
+/// game technology from the table's list (`[[game_tech]]`), no engine or game stack in any form and no
+/// stack the way the table's phrases name one ("in Python"), and the default
+/// engine isn't on this computer (R2.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineSkipped {
+    /// The engine the game would have been built with.
+    pub engine: game::Builder,
+    /// The technology the request names, as the list shows it ("Three.js").
+    pub named: &'static str,
+}
+
+impl EngineSkipped {
+    /// What the person is told, with how to get the engine back.
+    pub fn notice(&self) -> String {
+        let engine = self.engine.name();
+        let id = stacks::get(self.engine.stack()).and_then(|s| s.engine.as_deref()).unwrap_or(engine);
+        format!(
+            "{engine} isn't installed, so this game is built with what your request names ({}) instead. To build it with {engine}, get {engine} (Settings → Engines in the app) and start a new project with \"Build with\" set to {engine} (`--build-with {id}` in the CLI).",
+            self.named
+        )
+    }
+
+    /// Records the skip in `ws`'s journal (in its investigation, where the run's own entries go). The
+    /// run does this when it picks the stack, and the app does it when Make's Start creates the
+    /// project with Builder's choice.
+    /// The investigation is opened, or made as the run makes it, first: the run can't make it in a
+    /// folder that already holds a journal.
+    pub fn journal(&self, ws: &Workspace) -> Result<(), ToolError> {
+        let project = investigation(ws)?;
+        let entry = json!({"action": "engine_skipped", "engine": self.engine.name(), "named": self.named, "stack": stacks::BUILDERS_CHOICE});
+        craft_anything_engine::journal::append(&project.root, "stack", entry);
+        Ok(())
+    }
+}
+
+/// `ws`'s investigation project (its evidence and journal), made the first time it is needed.
+pub fn investigation(ws: &Workspace) -> Result<Project, ToolError> {
+    let dir = ws.investigation_dir();
+    Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))
+}
+
+/// Whether a new game whose stack would be its kind's default `engine`
+/// (nothing picked, nothing named) is built with the builder's choice instead: only when the request names a technology from the
+/// table's list and `installed` (asked last, as it looks through the computer) says the engine isn't
+/// on this computer at all: an engine that is here but not ready (Unreal without its C++ tools)
+/// keeps its own way to finish setting it up. A request that names
+/// nothing keeps its engine, so the person is still offered to get it.
+pub fn listed_tech_instead(
+    kinds: &KindRegistry,
+    request: &str,
+    target: &TargetRef,
+    engine: game::Builder,
+    installed: impl FnOnce(game::Builder) -> bool,
+) -> Option<EngineSkipped> {
+    if engine == game::Builder::Rust {
+        return None;
+    }
+    // A game in the request's own words (a picked folder or a ticked box alone isn't kept: the run
+    // decides the kind from the request and the stack, and Builder's choice is no engine).
+    if kinds.detect(request, target, "")?.id() != GameKind::ID || kinds.named(request, target).is_some() {
+        return None;
+    }
+    let words = stacks::words(request);
+    // An engine or a game stack named any way at all ("a Unity WebGL game", "Unity3D", "UE5",
+    // "a Phaser game", "a Rust game"), not only "in Unity": nothing changes here. When the table's
+    // phrases don't catch the word, that means the kind's default as before, so "a Phaser game
+    // with WebGL" still gets Unity and stops for it if it's missing.
+    if words.split_whitespace().any(names_an_engine_or_game_stack) {
+        return None;
+    }
+    let named = stacks::game_tech_named(&words)?;
+    if installed(engine) {
+        return None;
+    }
+    Some(EngineSkipped { engine, named: named.name.as_str() })
+}
+
+/// Whether one word of a request (through [`stacks::words`]) names a game engine or a game stack the
+/// table has, with or without a version ("unity", "unity2d", "godot4", "ue5", "phaser3", "bevy"):
+/// such a request is left as it was without this rule (the table's phrases may still not pick that
+/// stack, so "a Phaser game with WebGL" keeps the default engine), and Builder's choice isn't put in
+/// its place. Other stacks
+/// named only as a word ("a Python game with Pygame") don't count: the builder then uses what the
+/// request names, as Builder's choice would.
+fn names_an_engine_or_game_stack(word: &str) -> bool {
+    let version = |rest: &str| ["2d", "3d"].contains(&rest) || rest.chars().all(|c| c.is_ascii_digit());
+    ["unity", "unreal", "godot", "ue", "phaser", "bevy", "rust", "macroquad"].iter().any(|e| word.strip_prefix(e).is_some_and(version))
+}
+
 /// Whether `folder` already holds a project (its `craft.json` is there).
 pub fn has_project(folder: &Path) -> bool {
     folder.join(craft_anything_engine::workspace::MANIFEST).is_file()

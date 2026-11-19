@@ -74,7 +74,10 @@ impl CraftApp {
         // Games are built with an engine, unless the request names another way to build; one that
         // isn't here yet is got first, then this starts.
         let game = make::is_game(&self.kinds, &draft);
-        let engine = if game { crate::engine_ui::chosen(&self.kinds, &draft) } else { None };
+        // A game naming a technology from the stack table's list, whose default engine isn't
+        // here, starts without it, as Make said (R2.7).
+        let skipped = if game { crate::engine_ui::skipped(&self.kinds, &draft, self.game_engines.as_ref()) } else { None };
+        let engine = if game && skipped.is_none() { crate::engine_ui::chosen(&self.kinds, &draft) } else { None };
         if let Some(b) = engine
             && !self.game_engines.as_ref().is_some_and(|i| i.ready(b))
         {
@@ -96,6 +99,9 @@ impl CraftApp {
         let own = draft.folder.as_deref().and_then(Path::file_name).filter(|_| draft.mine);
         let name = own.map_or_else(|| suggest_name(&request, &target), |n| n.to_string_lossy().into_owned());
         let (projects_dir, budget, generate) = (self.settings.projects_dir(), self.settings.assets.budget(), game && draft.generate_assets);
+        if let Some(s) = &skipped {
+            self.toast(crate::engine_ui::skipped_started(s), false);
+        }
         // The folder, its records and copies of the pictures are written on a worker (a slow or
         // network drive must not freeze the window); `created` starts the build.
         self.creating = Some(self.jobs.spawn(tr("Create the project"), false, move |_| {
@@ -108,8 +114,12 @@ impl CraftApp {
             let mut ws = created.map_err(|e| e.for_people())?;
             // A new project starts with the stack, asset budget and builder from Make; a folder
             // that already held one keeps what the person set there.
-            rebuild::project::apply_new_project_fields(&mut ws, attached, engine.map(|b| b.stack()), budget, generate, draft.ai.as_deref())
-                .map_err(|e| e.for_people())?;
+            let stack = if skipped.is_some() { Some(rebuild::stacks::BUILDERS_CHOICE) } else { engine.map(|b| b.stack()) };
+            rebuild::project::apply_new_project_fields(&mut ws, attached, stack, budget, generate, draft.ai.as_deref()).map_err(|e| e.for_people())?;
+            // The run finds the stack already set, so the skip is recorded here, as the run would.
+            if let Some(s) = skipped.filter(|_| !attached) {
+                s.journal(&ws).map_err(|e| e.for_people())?;
+            }
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);
             Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached })
         }));
@@ -847,10 +857,16 @@ impl CraftApp {
     }
 }
 
+/// Whether a project is built as a game, so its pictures and models may be generated: the kind the
+/// run picks, whatever the stack (an engine, or Builder's choice for a game naming Three.js, R2.7).
+fn builds_a_game(kinds: &KindRegistry, m: &craft_anything_engine::workspace::Manifest) -> bool {
+    kinds.detect(&m.request, &m.target, &m.stack).is_some_and(|k| k.id() == craft_anything_ai::rebuild::GameKind::ID)
+}
+
 /// A game project's generated-assets switch, and "7 · $2.10 of $5.00" once it's on or assets were made.
 fn asset_line(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
     let t = Tokens::get(ui.ctx());
-    if craft_anything_engines::game::Builder::from_stack(&ws.manifest.stack).is_none() {
+    if !builds_a_game(&app.kinds, &ws.manifest) {
         return;
     }
     widgets::caption(ui, "Generated assets");
@@ -977,7 +993,7 @@ fn side(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
     steps(app, ui, ws);
     ui.add_space(theme::space::LG);
     open_questions(app, ui);
-    if craft_anything_engines::game::Builder::from_stack(&m.stack).is_some() {
+    if builds_a_game(&app.kinds, m) {
         widgets::card(&t).inner_margin(theme::pad::ROW).show(ui, |ui| {
             ui.set_width(ui.available_width());
             asset_line(app, ui, ws);

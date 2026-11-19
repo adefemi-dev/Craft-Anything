@@ -124,3 +124,84 @@ name = "Tailwind CSS"
 asked_by = [" tailwind ", " tailwindcss "]
 stacks = ["Next.js + TypeScript", "React + TypeScript (Vite)", "Electron", "Builder's choice"]
 steps = "Style with Tailwind CSS (v4, through @tailwindcss/postcss for Next.js or @tailwindcss/vite for Vite), with the original's colours, fonts, text sizes, spacing and breakpoints from capture.json as theme tokens in an @theme block."
+
+# A `[[game_tech]]` is a game technology the table has no stack for (Three.js, Pygame…). A new game
+# whose request names one, picks no engine and whose default engine isn't on this computer is built
+# with "Builder's choice" instead of stopping for the engine (R2.7). `said_as` phrases are matched
+# like `asked_by`, as whole words. Leave out words that also mean ordinary things ("canvas",
+# "love", "love 2d", "babylon", "pixi" alone): a false match skips the engine the person may want.
+[[game_tech]]
+name = "Three.js"
+said_as = [" three js ", " threejs "]
+
+[[game_tech]]
+name = "Babylon.js"
+said_as = [" babylon js ", " babylonjs "]
+
+[[game_tech]]
+name = "PixiJS"
+said_as = [" pixijs ", " pixi js "]
+
+[[game_tech]]
+name = "PlayCanvas"
+said_as = [" playcanvas "]
+
+[[game_tech]]
+name = "Kaboom.js"
+said_as = [" kaboom js ", " kaboomjs ", " kaplay "]
+
+[[game_tech]]
+name = "Excalibur.js"
+said_as = [" excalibur js ", " excaliburjs "]
+
+[[game_tech]]
+name = "raylib"
+said_as = [" raylib "]
+
+[[game_tech]]
+name = "LÖVE"
+said_as = [" löve ", " love2d ", " löve2d "]
+
+[[game_tech]]
+name = "Pygame"
+said_as = [" pygame "]
+
+[[game_tech]]
+name = "MonoGame"
+said_as = [" monogame "]
+
+[[game_tech]]
+name = "libGDX"
+said_as = [" libgdx "]
+
+[[game_tech]]
+name = "SDL"
+said_as = [" sdl ", " sdl2 ", " sdl 2 ", " sdl3 ", " sdl 3 "]
+
+[[game_tech]]
+name = "SFML"
+said_as = [" sfml "]
+
+[[game_tech]]
+name = "HTML5"
+said_as = [" html5 ", " html 5 "]
+
+[[game_tech]]
+name = "WebGL"
+said_as = [" webgl "]
+
+[[game_tech]]
+name = "p5.js"
+said_as = [" p5 js ", " p5js "]
+
+[[game_tech]]
+name = "Pyxel"
+said_as = [" pyxel "]
+
+[[game_tech]]
+name = "Ebitengine"
+said_as = [" ebitengine ", " ebiten "]
+
+[[game_tech]]
+name = "HaxeFlixel"
+said_as = [" haxeflixel "]

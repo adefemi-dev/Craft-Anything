@@ -52,6 +52,17 @@ pub const SERVER_CONNECT_WAIT: Duration = Duration::from_secs(15);
 /// starting, or loading a model before it answers, took longer than the 10 seconds it had (#1429).
 pub const SERVER_ANSWER_WAIT: Duration = Duration::from_secs(60);
 
+/// The chat models a server listed when [`AiHub::add_server`] refused to guess between them
+/// (#1434): empty for any other error.
+pub fn models_to_choose(e: &ToolError) -> Vec<String> {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get("choose_model"))
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.iter().filter_map(serde_json::Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Kinds of backend. See `plan/05-ai-backends.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -193,6 +204,14 @@ fn until_cancelled<T: Send + 'static>(cancel: &CancelToken, ask: impl FnOnce() -
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(ToolError::internal("Asking the server stopped without an answer.")),
         }
     }
+}
+
+/// A server on this computer or its network (Ollama, LM Studio, one reached over ssh): it costs
+/// nothing and gets the small context budget, and Auto trims its builder's tools by its window. A
+/// remote OpenAI-compatible service has a large context and a bill, as any other cloud API (#374).
+pub fn runs_here(c: &BackendConfig) -> bool {
+    let over_ssh = c.ssh_host.as_deref().is_some_and(|h| !h.trim().is_empty());
+    c.kind == BackendKind::OpenaiCompatible && (over_ssh || c.base_url.as_deref().filter(|b| !b.trim().is_empty()).is_none_or(detect::on_this_network))
 }
 
 fn opencode_go_models_base(base: &str) -> String {
@@ -387,6 +406,11 @@ pub trait Conversation: Send {
     /// Drain new events (non-blocking).
     fn poll(&mut self) -> Vec<AgentEvent>;
     fn answer_consent(&mut self, call_id: &str, allow: bool);
+    /// Refuse a tool without asking anyone: the model is told `why`, not that the person said no.
+    fn refuse_consent(&mut self, call_id: &str, why: &str) {
+        let _ = why;
+        self.answer_consent(call_id, false);
+    }
     fn stop(&mut self);
     fn is_busy(&self) -> bool;
 }
@@ -565,8 +589,9 @@ impl AiHub {
 
     /// Add an OpenAI-compatible server by its address: Ollama or LM Studio on another computer, or
     /// a hosted service with its key. It's added only when it answers with its models; without a
-    /// model, a chat model it says is loaded (`/api/ps`) is used, else the first one it lists that
-    /// can chat. Returns the model. Anthropic's own
+    /// model, a chat model it says is loaded (`/api/ps`) is used, else the only one it lists that
+    /// can chat; when it lists several, the person chooses ([`models_to_choose`] reads them from
+    /// the error). Returns the model. Anthropic's own
     /// address is added as an Anthropic backend, as its API isn't OpenAI's.
     pub fn add_server(&self, name: &str, address: &str, model: Option<&str>, key: Option<String>) -> Result<String, ToolError> {
         self.add_server_within(name, address, model, key, SERVER_ANSWER_WAIT, &CancelToken::default())
@@ -636,9 +661,25 @@ impl AiHub {
             }
             detect::chat_model(&openai::OpenAi::compatible(name, address, key.clone(), "").loaded_models(Duration::from_secs(5)))
         };
+        // Several chat models and none known to be loaded: which one is in use can't be told, and
+        // the first may be one the server would download (#1434). The person picks; the list
+        // goes in `details.choose_model` for the form to offer.
+        let several = || {
+            let chats = detect::chat_models(&models);
+            if kind == BackendKind::Anthropic || chats.len() < 2 {
+                return Ok(None);
+            }
+            let some = chats.iter().take(5).map(String::as_str).collect::<Vec<_>>().join(", ");
+            let more = if chats.len() > 5 { ", …" } else { "" };
+            Err(ToolError::new(ErrorCode::BadInput, format!("{address} lists {} chat models and doesn't say which one is loaded.", chats.len()))
+                .with_remediation(format!(
+                    "Choose the model to use ({some}{more}), then add it again: asking for one the server hasn't got may start a download."
+                ))
+                .with_details(serde_json::json!({ "choose_model": chats })))
+        };
         let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
             Some(m) => m.to_string(),
-            None => loaded().or_else(|| detect::chat_model(&models)).ok_or_else(|| {
+            None => loaded().map_or_else(several, |m| Ok(Some(m)))?.or_else(|| detect::chat_model(&models)).ok_or_else(|| {
                 let reason = if models.is_empty() { "has no models yet" } else { "doesn't list a model that can chat" };
                 ToolError::new(ErrorCode::NotFound, format!("{address} {reason}."))
                     .with_remediation("Load a chat model on the server first, or enter the name of a chat model you know is available.")
@@ -766,10 +807,10 @@ impl AiHub {
         let Some(b) = cfg.backends.iter_mut().find(|b| b.config.name == name) else { return Ok(false) };
         match b.config.kind {
             BackendKind::AgentCli => {
-                // Ask the adapter, not the id: Claude Code is also saved as `claude`, and both must
-                // mean "no --model" when the choice is the default.
-                let claude_code = cli_agents::adapter_for(&b.config.model).ids().contains(&"claude-code");
-                let clear = claude_code && model == crate::anthropic::CLAUDE_CODE_DEFAULT;
+                // Ask the adapter, not the id: Claude Code is also saved as `claude`, and both, like
+                // Codex, must mean "no model passed" when the choice is the default.
+                let own_default = cli_agents::adapter_for(&b.config.model).offers_own_default();
+                let clear = own_default && model == crate::anthropic::CLAUDE_CODE_DEFAULT;
                 if model_options::supported(&b.config) && (clear || b.options.cli_model.as_deref() != Some(model)) {
                     b.options.cli_context = None;
                     b.options.cli_reasoning_effort = None;
@@ -819,6 +860,36 @@ impl AiHub {
             self.save_config(&config)?;
         }
         Ok(requested)
+    }
+
+    /// The tools a builder on this API backend is offered, and whether Auto here depends on the
+    /// model's window (a local model) rather than offering every tool (a paid service).
+    pub fn tool_list(&self, name: &str) -> Result<(ToolList, bool), ToolError> {
+        let entry = self.entry(name)?;
+        Self::api_only(&entry, "tool list")?;
+        Ok((entry.options.tools.unwrap_or_default(), runs_here(&entry.config)))
+    }
+
+    /// Change the tools future builders on this backend are offered. Auto is saved as no setting.
+    pub fn set_tool_list(&self, name: &str, list: ToolList) -> Result<ToolList, ToolError> {
+        let mut config = self.config_to_change()?;
+        let entry = config.backends.iter_mut().find(|entry| entry.config.name == name).ok_or_else(|| {
+            ToolError::invalid(format!("No AI backend named {name:?}")).with_remediation("See `craft-anything-cli ai list`, or add one in Settings → AI.")
+        })?;
+        Self::api_only(entry, "tool list")?;
+        let requested = Some(list).filter(|l| *l != ToolList::Auto);
+        if entry.options.tools != requested {
+            entry.options.tools = requested;
+            self.save_config(&config)?;
+        }
+        Ok(list)
+    }
+
+    fn api_only(entry: &BackendEntry, what: &str) -> Result<(), ToolError> {
+        if entry.config.kind == BackendKind::AgentCli {
+            return Err(ToolError::invalid(format!("Agent apps choose their own tools. Set a {what} on an API backend.")));
+        }
+        Ok(())
     }
 
     fn api_request_rate(entry: &BackendEntry) -> Result<Option<u32>, ToolError> {
@@ -1058,10 +1129,7 @@ impl AiHub {
             _ => None,
         };
         let base = tunneled_base.as_deref().or(base);
-        // A server on this computer or its network (Ollama, LM Studio, one reached over ssh) costs
-        // nothing and gets the small context budget; a remote OpenAI-compatible service has a
-        // large context and a bill, as any other cloud API (#374).
-        let local = c.kind == BackendKind::OpenaiCompatible && base.is_none_or(detect::on_this_network);
+        let local = runs_here(c);
         let limit = stream_limit(&e.options);
         let sends_effort = effort_in_use(c, Some(&e.options)).is_some();
         let with_limit = |mut o: openai::OpenAi| {
@@ -1146,38 +1214,35 @@ impl AiHub {
     /// every toolset is enabled, so it can look inside the original with all of them.
     /// `transcript`: where the conversation is kept, and resumed from when it's there in this
     /// mode. `deep` is the run's mode, given by the caller: a tool that starts a build holds the
-    /// session (#1102).
-    pub fn start_builder(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>, deep: bool) -> Result<ApiConversation, ToolError> {
-        use craft_anything_engine::Toolset;
-        let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
-        self.start_loop(entry, beginner, transcript, deep, &toolsets, true)
-    }
-
-    /// Start the asset extractor: our agent loop with the Build tools and the game archive tools.
-    pub fn start_extractor(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>) -> Result<ApiConversation, ToolError> {
-        use craft_anything_engine::Toolset;
-        self.start_loop(entry, beginner, transcript, true, &[Toolset::Core, Toolset::Build, Toolset::Formats], false)
-    }
-
-    /// Start one loop with these toolsets, keeping its transcript and resuming it only in `deep`.
-    fn start_loop(
+    /// session (#1102). `notes`: the build's notes folder, read between tool steps.
+    pub fn start_builder(
         &self,
         entry: &BackendEntry,
         beginner: bool,
         transcript: Option<PathBuf>,
         deep: bool,
-        toolsets: &[craft_anything_engine::Toolset],
-        lean_for_local: bool,
+        notes: Option<PathBuf>,
     ) -> Result<ApiConversation, ToolError> {
+        use craft_anything_engine::Toolset;
+        let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
+        self.start_loop(entry, &toolsets, LoopConfig { beginner, transcript, deep, lean_for_local: true, notes, ..LoopConfig::default() })
+    }
+
+    /// Start the asset extractor: our agent loop with the Build tools and the game archive tools.
+    pub fn start_extractor(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>) -> Result<ApiConversation, ToolError> {
+        use craft_anything_engine::Toolset;
+        let cfg = LoopConfig { beginner, transcript, deep: true, ..LoopConfig::default() };
+        self.start_loop(entry, &[Toolset::Core, Toolset::Build, Toolset::Formats], cfg)
+    }
+
+    /// Start one loop with these toolsets and `cfg`, which keeps its transcript and resumes it only
+    /// in its mode; the prices and failure logs are the hub's.
+    fn start_loop(&self, entry: &BackendEntry, toolsets: &[craft_anything_engine::Toolset], cfg: LoopConfig) -> Result<ApiConversation, ToolError> {
         let mut slot = self.build_model(entry)?;
         slot.max_turns = slot.max_turns.max(agent::BUILDER_MAX_TURNS);
         let host = Arc::new(EngineHost(self.engine.clone()));
-        ApiConversation::start_with(
-            host,
-            vec![slot],
-            LoopConfig { beginner, prices: self.config().prices.clone(), transcript, deep, lean_for_local, logs: self.failure_logs(), ..LoopConfig::default() },
-            toolsets.iter().copied().collect(),
-        )
+        let cfg = LoopConfig { prices: self.config().prices.clone(), logs: self.failure_logs(), ..cfg };
+        ApiConversation::start_with(host, vec![slot], cfg, toolsets.iter().copied().collect())
     }
 
     /// Start a conversation with whichever backend fills `role` in the crew.

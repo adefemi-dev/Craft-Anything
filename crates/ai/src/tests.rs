@@ -369,10 +369,10 @@ fn an_api_transcript_is_resumed_only_in_its_mode() {
     let path = dir.path().join("transcript.json");
     let history = vec![crate::model::Msg::user_text("a Deep conversation")];
     crate::context::save(&path, &history, true).unwrap();
-    assert!(h.start_builder(&entry, false, Some(path.clone()), true).unwrap().resumed(), "Deep continues a Deep transcript");
-    assert!(!h.start_builder(&entry, false, Some(path.clone()), false).unwrap().resumed(), "Clean room starts fresh");
+    assert!(h.start_builder(&entry, false, Some(path.clone()), true, None).unwrap().resumed(), "Deep continues a Deep transcript");
+    assert!(!h.start_builder(&entry, false, Some(path.clone()), false, None).unwrap().resumed(), "Clean room starts fresh");
     crate::context::save(&path, &history, false).unwrap();
-    assert!(!h.start_builder(&entry, false, Some(path), true).unwrap().resumed(), "Deep doesn't continue a Clean room transcript");
+    assert!(!h.start_builder(&entry, false, Some(path), true, None).unwrap().resumed(), "Deep doesn't continue a Clean room transcript");
 }
 
 /// Compare checks either position; enabled named and automatic chat choices still work.
@@ -665,6 +665,13 @@ fn an_ais_model_is_changed() {
     assert_eq!(h.options().get("Claude Code").and_then(|o| o.cli_model.clone()), None);
     assert!(!h.set_model("Nobody", "m").unwrap());
     assert!(h.set_model("Box", " ").is_err());
+    // #2109: Codex takes a model the same way, and its default clears it, so no -m is passed.
+    let codex = BackendConfig { name: "Codex".into(), kind: BackendKind::AgentCli, model: "codex".into(), base_url: None, ssh_host: None, enabled: true };
+    h.add_backend(codex, None).unwrap();
+    assert!(h.set_model("Codex", "first").unwrap());
+    assert_eq!(h.options().get("Codex").and_then(|o| o.cli_model.clone()).as_deref(), Some("first"));
+    assert!(h.set_model("Codex", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
+    assert_eq!(h.options().get("Codex").and_then(|o| o.cli_model.clone()), None);
 
     // The Claude Code adapter is also registered as `claude`; the default must clear for that id
     // too, or a run would pass `--model default` (#470 review).
@@ -926,7 +933,8 @@ pub(crate) fn serve_routes(routes: &'static [(&'static str, &'static str)]) -> S
 
 /// #1434: FastFlowLM's `/models` lists every model it can download; taking the first started a
 /// 5.5 GB download and unloaded the model in use. A chat model the server says is loaded comes
-/// first; without `/api/ps`, or with nothing loaded, the first chat model listed is still used.
+/// first; without `/api/ps`, or with nothing loaded, the person chooses between several chat
+/// models, and the only one is used.
 #[test]
 fn a_server_added_without_a_model_gets_the_one_it_has_loaded() {
     let (h, _d) = hub();
@@ -938,9 +946,21 @@ fn a_server_added_without_a_model_gets_the_one_it_has_loaded() {
     assert_eq!(h.add_server("Npu", &flm, None, None).unwrap(), "qwen3.8-mtp-uncensored:27b", "the loaded chat model, not an embedding one");
     assert_eq!(h.add_server("Named", &flm, Some("gemma3:1b"), None).unwrap(), "gemma3:1b", "a named model still wins");
     let idle = serve_routes(&[("/v1/models", CATALOGUE), ("/api/ps", r#"{"models":[]}"#)]);
-    assert_eq!(h.add_server("Idle", &idle, None, None).unwrap(), "deepseek-r1:8b", "nothing loaded: the list's first");
     let no_ps = serve_routes(&[("/v1/models", CATALOGUE)]);
-    assert_eq!(h.add_server("Studio", &no_ps, None, None).unwrap(), "deepseek-r1:8b", "no /api/ps: the list's first");
+    for (name, url) in [("Idle", &idle), ("Studio", &no_ps)] {
+        let e = h.add_server(name, url, None, None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadInput, "{name}: {e:?}");
+        assert_eq!(models_to_choose(&e), ["deepseek-r1:8b", "gemma3:1b", "qwen3.8-mtp-uncensored:27b"], "{name}");
+        assert!(e.message.contains("lists 3 chat models"), "{e:?}");
+        assert!(e.remediation.as_deref().is_some_and(|r| r.contains("deepseek-r1:8b, gemma3:1b")), "{e:?}");
+    }
+    assert_eq!(h.add_server("Studio", &no_ps, Some("gemma3:1b"), None).unwrap(), "gemma3:1b", "the chosen one is added");
+    // One chat model beside an embedding one: nothing to choose.
+    let one = serve_routes(&[("/v1/models", r#"{"object":"list","data":[{"id":"nomic-embed-text"},{"id":"qwen3:8b"}]}"#)]);
+    assert_eq!(h.add_server("One", &one, None, None).unwrap(), "qwen3:8b");
+    assert!(models_to_choose(&ToolError::invalid("other")).is_empty(), "other errors offer nothing");
+    let names: Vec<_> = h.backends().into_iter().map(|b| b.name).collect();
+    assert!(!names.iter().any(|n| n == "Idle"), "nothing added while a choice is owed: {names:?}");
 }
 
 /// #54, #98: a server on another computer is added by its address, with a model that can chat
@@ -1189,6 +1209,53 @@ fn anthropic_refusal_and_http_errors() {
         ev.iter().any(|e| matches!(e, AgentEvent::Error { message, remediation: Some(r), .. } if message.contains("invalid x-api-key") && r.contains("key"))),
         "{ev:?}"
     );
+}
+
+/// A service, or a proxy in front of it, can repeat the key or words from the request in its
+/// error: in a JSON error's message, type or code, in a plain-text body, or in a stream's error
+/// event. None of it reaches the failure log, in the error, the service's code or the advice. The
+/// marker is written like an error code (lower-case letters and an underscore), so only a list of
+/// known codes keeps it out; a known code is still kept (R5.5).
+#[test]
+fn a_failure_log_leaves_out_what_the_service_repeats_of_the_key_and_the_request() {
+    let key = "sk-test-reflected-key";
+    let marker = "quokka_umbrella";
+    let reflected = format!("key {key} may not ask about the {marker}");
+    let stream_error = |kind: &str| {
+        sse(&[
+            json!({"type":"message_start","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5}}}),
+            json!({"type":"error","error":{"type":kind,"message":reflected}}),
+        ])
+    };
+    let (url, _seen) = mock(vec![
+        (401, "application/json", json!({"type":"error","error":{"type":marker,"message":reflected}}).to_string()),
+        (400, "application/json", json!({"error":{"code":marker,"message":reflected}}).to_string()),
+        (400, "text/plain", format!("Rejected by the proxy: {reflected}")),
+        (200, "text/event-stream", stream_error(marker)),
+        (200, "text/event-stream", stream_error("invalid_request_error")),
+    ]);
+    let (h, _d) = hub();
+    add(&h, "Claude", BackendKind::Anthropic, &url, Some(key));
+    let mut c = h.start(Some("Claude"), false).unwrap();
+    let unknown = "The service's error code: not a known one";
+    let expected: [&[&str]; 5] = [
+        &["Error: NoPermission", "HTTP status: 401", unknown, "Diagnosis: The API key was rejected"],
+        &["Error: BadInput", "HTTP status: 400", unknown],
+        &["Error: BadInput", "HTTP status: 400"],
+        &["Error: ProgramFailed", unknown, "Diagnosis: Try again"],
+        &["Error: ProgramFailed", "The service's error code: invalid_request_error"],
+    ];
+    for (n, parts) in expected.iter().enumerate() {
+        let ev = run(&mut c, &format!("a question about the {marker}, take {n}"));
+        let log = ev.iter().find_map(|e| if let AgentEvent::Error { log, .. } = e { log.clone() } else { None });
+        let text = std::fs::read_to_string(log.unwrap_or_else(|| panic!("no log for take {n}: {ev:?}"))).unwrap();
+        for hidden in [key, marker, "may not ask"] {
+            assert!(!text.contains(hidden), "take {n}, {hidden}: {text}");
+        }
+        for part in *parts {
+            assert!(text.contains(part), "take {n}, {part}: {text}");
+        }
+    }
 }
 
 #[test]

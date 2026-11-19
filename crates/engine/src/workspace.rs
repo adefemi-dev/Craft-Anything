@@ -660,6 +660,22 @@ pub fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// `path` with `.` and `..` resolved lexically (no symlinks), made absolute when relative.
+pub fn normalized(path: &Path) -> PathBuf {
+    let path = absolute(path);
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// A folder-name slug: lower-case words joined by dashes, at most 40 characters.
 pub fn slug(s: &str) -> String {
     let mut out = String::new();
@@ -2055,5 +2071,11 @@ mod tests {
         ws.delete().unwrap();
         assert_eq!(std::fs::read_to_string(mine.join("index.html")).unwrap(), "<p>hi</p>");
         assert!(!mine.join(MANIFEST).exists() && !mine.join("inbox").exists() && !mine.join(AGENT_SESSION_FILE).exists());
+    }
+
+    #[test]
+    fn normalized_resolves_dot_and_parent_components() {
+        let root = std::env::current_dir().unwrap();
+        assert_eq!(normalized(&root.join("a/../b/./c")), root.join("b/c"));
     }
 }

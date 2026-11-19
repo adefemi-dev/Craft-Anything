@@ -1001,12 +1001,22 @@ fn a_website_is_signed_in_to_from_make() {
     assert!(h.state().signing_in.is_some(), "the sign-in started");
     assert!(wait(&mut h, |a| a.signing_in.is_none()), "and ended");
     assert!(
-        h.state().state.toasts.iter().any(|(t, err)| *err && t.starts_with("Couldn't sign in to the site.") && t.contains("chromium")),
+        h.state().state.toasts.iter().any(|(t, err)| *err && t.starts_with("example.com: Couldn't sign in to the site.") && t.contains("chromium")),
         "{:?}",
         h.state().state.toasts
     );
     h.run_steps(2);
     h.get_by_label("Sign in to this site");
+
+    // Not while a new project is being made: its build would study the site before the sign-in ends.
+    h.state_mut().creating = Some(u64::MAX);
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site").click();
+    h.run_steps(1);
+    assert!(h.state().signing_in.is_none(), "no sign-in while a project is made");
+    h.state_mut().sign_in_to_site("https://example.com");
+    assert!(h.state().signing_in.is_none(), "nor from elsewhere");
+    h.state_mut().creating = None;
 
     // While a sign-in window is open: no second one, a way to stop waiting, and Start waits.
     h.state_mut().signing_in = Some(u64::MAX);

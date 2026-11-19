@@ -436,7 +436,10 @@ fn sign_in(app: &mut CraftApp, ui: &mut Ui, url: Option<&str>) {
         } else if let Some(url) = url {
             ui.label(RichText::new(tr("Does the site show more once you're signed in?")).size(theme::SMALL).color(t.text_dim));
             let hint = tr("A browser window opens: sign in there yourself, then close it. Craft Anything never sees your password. The sign-in is kept on this computer and used when this site is studied.");
-            if widgets::secondary(ui, None, "Sign in to this site").on_hover_text(hint).clicked() {
+            let free = app.creating.is_none();
+            let button = ui.add(widgets::Button::new(widgets::ButtonKind::Secondary, "Sign in to this site").enabled(free));
+            let button = if free { button.on_hover_text(hint) } else { button.on_disabled_hover_text(tr("Wait until the new project is made.")) };
+            if button.clicked() && free {
                 app.sign_in_to_site(url);
             }
         }
@@ -454,8 +457,17 @@ pub fn sign_in_words(result: &serde_json::Value) -> (String, bool) {
             (tr("Your sign-in was saved, but the site still asks you to sign in. Sign in again and choose \"remember me\" if the site offers it."), true)
         }
         _ if check["done"].as_bool() != Some(true) => (tr("Your sign-in was saved, but opening the site again to check it didn't work."), true),
-        _ => (tr("Signed in. Studies of this site now see it as you do."), false),
+        // No password field after the window closed doesn't prove a sign-in (a public page, a
+        // passwordless flow): say what happened, not what it may mean.
+        _ => (tr("The sign-in window was closed. Studies of this site will use what it saved."), false),
     }
+}
+
+/// The site a `web_site_sign_in` call was for, as the person typed it (without `https://`).
+pub fn site_name(params: &serde_json::Value) -> &str {
+    let url = params["url"].as_str().unwrap_or_default();
+    let host = url.split_once("://").map_or(url, |(_, rest)| rest);
+    host.strip_suffix('/').unwrap_or(host)
 }
 
 /// Clean room or Deep for what is recreated: the title bar's switch, as a plain choice.
@@ -664,7 +676,7 @@ mod tests {
         use serde_json::json;
         let checked = |sign_in_page: bool| json!({"done": true, "sign_in_page": sign_in_page, "error": null});
         let words = |ended: &str, check: serde_json::Value| sign_in_words(&json!({"saved": true, "ended": ended, "check": check}));
-        assert_eq!(words("closed", checked(false)), ("Signed in. Studies of this site now see it as you do.".to_string(), false));
+        assert_eq!(words("closed", checked(false)), ("The sign-in window was closed. Studies of this site will use what it saved.".to_string(), false));
         let (still_asks, warn) = words("closed", checked(true));
         assert!(warn && still_asks.contains("still asks you to sign in"), "{still_asks}");
         let (unchecked, warn) = words("closed", json!({"done": false, "sign_in_page": null, "error": "the browser closed"}));
@@ -675,6 +687,15 @@ mod tests {
         assert!(!warn && stopped.starts_with("Stopped waiting"), "{stopped}");
         // A result without a check (an older or a changed tool) isn't taken for a good sign-in.
         assert!(sign_in_words(&json!({"saved": true})).1);
+    }
+
+    #[test]
+    fn a_sign_in_names_the_site_as_typed() {
+        use serde_json::json;
+        assert_eq!(site_name(&json!({"url": "https://example.com"})), "example.com");
+        assert_eq!(site_name(&json!({"url": "https://example.com/"})), "example.com");
+        assert_eq!(site_name(&json!({"url": "http://example.com:8080/app"})), "example.com:8080/app");
+        assert_eq!(site_name(&json!({})), "");
     }
 
     #[test]

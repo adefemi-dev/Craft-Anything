@@ -18,9 +18,10 @@ Sign in in the browser window that opened, then close it.
 Stop waiting
 Finish signing in to the site first.
 Couldn't sign in to the site.
-Signed in. Studies of this site now see it as you do.
+The sign-in window was closed. Studies of this site will use what it saved.
 Your sign-in was saved, but the site still asks you to sign in. Sign in again and choose "remember me" if the site offers it.
 Your sign-in was saved, but opening the site again to check it didn't work.
 The sign-in window was open too long, so it was closed. What it had saved is kept.
 Stopped waiting for the sign-in window. What it had saved is kept.
 Stopped the sign-in.
+Wait until the new project is made.

@@ -47,6 +47,7 @@ pub mod workbench;
 
 use craft_anything_ai::{AgentEvent, AiHub, BackendConfig, Conversation, Detected};
 use craft_anything_engine::evidence::{ErrorCode, Evidence, ToolError, Unknown};
+use craft_anything_engine::tools::site_sign_in::SIGN_IN_TOOL;
 use craft_anything_engine::{CallOptions, Caller, Consent, Engine, Mode, Settings, TargetKind, ToolOutput, clean_room};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1058,11 +1059,11 @@ impl CraftApp {
     }
 
     /// Open a browser window on a website for the person to sign in to it themselves, so studies
-    /// of that site see it signed in (`web_site_sign_in`). One window at a time.
+    /// of that site see it signed in (`web_site_sign_in`). One window at a time, and not while a
+    /// new project is being made: its build would start and study the site before the sign-in ends.
     pub fn sign_in_to_site(&mut self, url: &str) {
-        if self.signing_in.is_none() {
-            let tool = craft_anything_engine::tools::site_sign_in::SIGN_IN_TOOL;
-            self.signing_in = Some(self.act(tool, json!({ "url": url }), tr("Sign in to a website")));
+        if self.signing_in.is_none() && self.creating.is_none() {
+            self.signing_in = Some(self.act(SIGN_IN_TOOL, json!({ "url": url }), tr("Sign in to a website")));
         }
     }
 
@@ -1124,15 +1125,18 @@ impl CraftApp {
                     self.toast(format!("{} {}", tr("Some plugins couldn't be read:"), failed.join("; ")), true);
                 }
             }
-            ("web_site_sign_in", Ok(v)) => {
+            // Each message names the site it was for: the address on Make may have changed since.
+            (SIGN_IN_TOOL, Ok(v)) => {
                 let (words, warn) = make::sign_in_words(&v);
-                self.toast(words, warn);
+                self.toast(format!("{}: {words}", make::site_name(params)), warn);
             }
             // "Stop waiting" before the window was up (or while another tool held the session).
-            ("web_site_sign_in", Err(e)) if e.code == ErrorCode::Cancelled => self.toast(tr("Stopped the sign-in."), false),
-            ("web_site_sign_in", Err(e)) if !clean_room::is_refusal(&e) => {
+            (SIGN_IN_TOOL, Err(e)) if e.code == ErrorCode::Cancelled => {
+                self.toast(format!("{}: {}", make::site_name(params), tr("Stopped the sign-in.")), false)
+            }
+            (SIGN_IN_TOOL, Err(e)) if !clean_room::is_refusal(&e) => {
                 let failed = tr("Couldn't sign in to the site.");
-                self.toast(format!("{failed} {}", e.for_people()), true);
+                self.toast(format!("{}: {failed} {}", make::site_name(params), e.for_people()), true);
             }
             ("project_open_folder", Err(e)) => self.toast(format!("{} {}", tr("Couldn't open the folder."), e.message), true),
             (

@@ -63,26 +63,54 @@ pub fn join_catalogs(src: &Path, out: &Path) {
                 continue;
             }
         };
-        let mut joined = String::new();
-        for file in files {
+        let files: Vec<PathBuf> = files.collect();
+        for file in &files {
             // The folder's scan sees a new or changed file; a listed file that's gone sees a removal.
             println!("cargo::rerun-if-changed={}", file.display());
-            match std::fs::read_to_string(&file) {
-                Ok(text) => {
-                    joined.push_str(&text);
-                    if !text.ends_with('\n') {
-                        joined.push('\n');
-                    }
-                }
-                Err(e) => println!("cargo::error=reading {}: {e}", file.display()),
-            }
         }
+        let joined = match join_files(&files) {
+            Ok(joined) => joined,
+            Err(problems) => {
+                for p in problems {
+                    println!("cargo::error={p}");
+                }
+                continue;
+            }
+        };
         let Some(code) = dir.file_name() else { continue };
         let target = out.join(code).with_extension("tsv");
         if let Err(e) = std::fs::write(&target, joined) {
             println!("cargo::error=writing {}: {e}", target.display());
         }
     }
+}
+
+/// One language's catalog files joined in the order given, or what's wrong: a file that can't be
+/// read, or a key (the text before the first tab) that two lines carry, which would leave one
+/// translation unused depending on which file sorts last.
+pub fn join_files(files: &[PathBuf]) -> Result<String, Vec<String>> {
+    let (mut joined, mut problems) = (String::new(), Vec::new());
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for file in files {
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(e) => {
+                problems.push(format!("reading {}: {e}", file.display()));
+                continue;
+            }
+        };
+        for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+            let Some((key, _)) = line.split_once('\t').filter(|(k, _)| !k.is_empty()) else { continue };
+            if let Some(first) = seen.insert(key.to_string(), file.clone()) {
+                problems.push(format!("{key:?} is in both {} and {}", first.display(), file.display()));
+            }
+        }
+        joined.push_str(&text);
+        if !text.ends_with('\n') {
+            joined.push('\n');
+        }
+    }
+    if problems.is_empty() { Ok(joined) } else { Err(problems) }
 }
 
 /// A folder's entries in name order; an entry that can't be read is an error, not a gap.

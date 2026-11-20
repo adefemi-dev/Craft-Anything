@@ -29,3 +29,32 @@ fn a_languages_catalog_files_are_joined_in_name_order() {
     assert!(!out.path().join("awaiting.tsv").exists(), "only folders are catalogs");
     assert!(!out.path().join("fr.tsv").exists(), "a removed language's old catalog is cleared");
 }
+
+/// Review of #1860: a key in two files of one language is refused, naming both files, rather
+/// than the joined catalog keeping whichever sorts last.
+#[test]
+fn a_key_in_two_files_of_a_language_is_refused() {
+    let src = tempfile::tempdir().unwrap();
+    let (core, extra) = (src.path().join("core.tsv"), src.path().join("r5.4-budget.tsv"));
+    std::fs::write(&core, "# de\nSettings\tEinstellungen\n").unwrap();
+    std::fs::write(&extra, "Budget\tBudget\n").unwrap();
+    assert!(build::join_files(&[core.clone(), extra.clone()]).is_ok(), "different keys join");
+    std::fs::write(&extra, "Budget\tBudget\nSettings\tOptionen\n").unwrap();
+    let problems = build::join_files(&[core.clone(), extra.clone()]).unwrap_err();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("\"Settings\"") && problems[0].contains("core.tsv") && problems[0].contains("r5.4-budget.tsv"), "{problems:?}");
+}
+
+/// Every language the app offers comes from its folder, so no catalog is a single shared file.
+#[test]
+fn every_language_is_a_folder() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for lang in craft_anything_ui_egui::i18n::LANGUAGES.iter().filter(|l| l.code != "en") {
+        assert!(src.join("i18n").join(lang.code).is_dir(), "{} has no catalog folder", lang.code);
+        assert!(
+            !src.join(format!("{}.tsv", lang.code)).exists() && !src.join("i18n").join(format!("{}.tsv", lang.code)).exists(),
+            "{} still has a single file",
+            lang.code
+        );
+    }
+}

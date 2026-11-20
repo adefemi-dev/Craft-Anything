@@ -298,7 +298,7 @@ func TestAnswer(t *testing.T) {
         let tool = stacks::toolchain_in(app).expect("go.mod identifies the Go toolchain");
         assert_eq!(tool.name, "Go");
 
-        let build = || own_build_check(app, "the project folder", stacks::BUILDERS_CHOICE, None, &stop);
+        let build = || own_build_check(app, "the project folder", stacks::BUILDERS_CHOICE, None, None, &stop);
         let test = || own_tests_check(app, Some(tool), &stop);
         assert_eq!(build(), (true, "`go build ./...` passed.".into()));
         assert_eq!(test(), (true, "`go test ./...` passed.".into()));

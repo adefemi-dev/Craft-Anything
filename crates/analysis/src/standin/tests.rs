@@ -1213,6 +1213,32 @@ fn a_named_operation_answered_by_another_ones_recording_moves_nothing() {
 }
 
 #[test]
+fn a_mutation_sent_as_text_is_not_answered_by_a_recorded_read() {
+    let mut list = entry("POST", &format!("{A}/graphql"), 200, r#"{"data":{"list":[1]}}"#);
+    list["request"]["postData"] = json!({"text": r#"{"query":"query HiddenList { list }","operationName":"HiddenList"}"#});
+    let opts = BuildOptions { hidden_values: vec!["HiddenList".into()], ..Default::default() };
+    let s = build_from_bytes(&har_of(vec![list]), &opts).unwrap();
+    let mut t = Turns::default();
+    let clear = br#"{"query":"mutation Clear { clear }"}"#;
+    assert_eq!(missing(answer(&s, &mut t, "POST", "/graphql", "", clear)).reason, NoMatchReason::WriteNotRecorded);
+    assert_eq!(t.position(), None, "and it moves nothing");
+    // Named only, a request can't be told from a read, so the recorded read still answers it.
+    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/graphql", "", br#"{"operationName":"HiddenList"}"#))), r#"{"data":{"list":[1]}}"#);
+    let query = br#"{"query":"query Other { list }"}"#;
+    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/graphql", "", query))), r#"{"data":{"list":[1]}}"#, "nor is a query sent as text refused");
+}
+
+#[test]
+fn only_writes_are_counted_as_writes() {
+    assert!(is_write_request("post", br#"{"query":"mutation Clear { clear }"}"#));
+    assert!(is_write_request("DELETE", b""));
+    assert!(is_write_request("POST", br#"{"operationName":"List"}"#), "a name alone could be a write");
+    assert!(!is_write_request("POST", br#"{"query":"query List { list }"}"#));
+    assert!(!is_write_request("GET", b""));
+    assert!(!is_write_request("HEAD", b""));
+}
+
+#[test]
 fn a_body_of_another_kind_steps_each_recorded_kind_on_its_own() {
     let post = |req: &str, resp: &str| {
         let mut e = entry("POST", &format!("{A}/search"), 200, resp);

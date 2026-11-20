@@ -64,7 +64,7 @@ pub fn specs() -> Vec<ToolSpec> {
         spec(
             "web_standin_start",
             "Start a stand-in backend",
-            "Answer HTTP requests on this computer from a file written by web_standin_build, and return its URL to point a rebuilt front end at. Listens on 127.0.0.1 only, refuses requests addressed to any other host and pages from other computers, and allows local pages through CORS. Stays running for this session, or until web_standin_stop. A request with no recorded answer gets a 404 with the nearest routes as JSON. A write the original accepted moves later reads of the same path, or of paths above or under it, on to what was recorded after it; nothing is worked out from what is sent. A write past the recorded ones of its kind gets a 404 with reason write_not_recorded and changes nothing; web_standin_show counts them in writes_refused. Runs no code from the recording.",
+            "Answer HTTP requests on this computer from a file written by web_standin_build, and return its URL to point a rebuilt front end at. Listens on 127.0.0.1 only, refuses requests addressed to any other host and pages from other computers, and allows local pages through CORS. Stays running for this session, or until web_standin_stop. A request with no recorded answer gets a 404 with the nearest routes as JSON. A write the original accepted moves later reads of the same path, or of paths above or under it, on to what was recorded after it; nothing is worked out from what is sent. A write past the recorded ones of its kind gets a 404 with reason write_not_recorded and changes nothing; web_standin_show counts every write it refused in writes_refused. Runs no code from the recording.",
             "Start a local stand-in for a website's backend, answering from a recording.",
             Toolset::Browser,
             Effects::MUTATES_SESSION.union(Effects::ACCESSES_NETWORK),
@@ -276,7 +276,7 @@ struct Log {
     answered_without_body: u64,
     by_route: BTreeMap<String, u64>,
     no_answer: u64,
-    /// Of those, writes the recording has no answer of its own for (`write_not_recorded`).
+    /// Of those, writes, whatever the recording lacks for them: none of them changes anything.
     writes_refused: u64,
     missing: BTreeMap<(String, String), MissingRow>,
     missing_not_listed: u64,
@@ -320,7 +320,7 @@ impl Answerer for Replay {
             }
             Answer::NoMatch(n) => {
                 log.no_answer = log.no_answer.saturating_add(1);
-                let refused_write = n.reason == NoMatchReason::WriteNotRecorded;
+                let refused_write = standin::is_write_request(&r.method, &r.body);
                 if refused_write {
                     log.writes_refused = log.writes_refused.saturating_add(1);
                 }

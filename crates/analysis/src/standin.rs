@@ -1177,7 +1177,8 @@ pub enum NoMatchReason {
     /// The matching responses need a cached body that is unavailable in the recording.
     CachedBodyUnavailable,
     /// A write the recording has no answer of its own for: past the recorded writes of its kind,
-    /// or a named operation where only another one's (its name hidden) was recorded.
+    /// a named operation where only another one's (its name hidden) was recorded, or a mutation
+    /// sent as text where only reads were.
     WriteNotRecorded,
 }
 
@@ -1248,6 +1249,24 @@ fn template_segments(t: &str) -> impl Iterator<Item = &str> {
 /// POST whose JSON body is GraphQL that only queries. `method` is upper case.
 fn is_write(method: &str, json: Option<&Value>) -> bool {
     !READ_METHODS.contains(&method) && !(method == "POST" && json.is_some_and(graphql_reads))
+}
+
+/// Whether [`answer`] takes this request as a write, so a server can count the ones it refuses.
+pub fn is_write_request(method: &str, body: &[u8]) -> bool {
+    let method = method.to_ascii_uppercase();
+    method != "HEAD" && is_write(&method, json_body(body).as_ref())
+}
+
+/// Whether a body carries GraphQL text of its own, not just an operation's name: then a write it
+/// asks for is known to be one, and a recorded read of the same name isn't its answer.
+fn has_document(v: &Value) -> bool {
+    let one =
+        |o: &serde_json::Map<String, Value>| o.get("query").and_then(Value::as_str).and_then(|q| craft_anything_js::api_ops::read_document(q, true)).is_some();
+    match v {
+        Value::Object(o) => one(o),
+        Value::Array(a) => a.iter().any(|x| x.as_object().is_some_and(one)),
+        _ => false,
+    }
 }
 
 /// `order` comes after `place`, where no place is before the start.
@@ -1432,6 +1451,10 @@ pub fn answer(standin: &StandIn, turns: &mut Turns, method: &str, path: &str, qu
     // On a timeline a lone answer takes no turn, so a set that starts with it later starts at the
     // beginning; without positions every answer takes one, as before positions were recorded.
     let timed = fit.iter().all(|i| route.samples.get(*i).is_some_and(|s| s.order.is_some()));
+    // A mutation sent as text where only reads were recorded: none of them is its answer.
+    if timed && write && json.as_ref().is_some_and(has_document) && fit.iter().all(|i| route.samples.get(*i).is_some_and(|s| !s.write)) {
+        return Answer::NoMatch(NoMatch { reason: NoMatchReason::WriteNotRecorded, nearest: Vec::new() });
+    }
     let Some((fit, stepping)) = on_timeline(standin, ri, route, fit, turns, write, key) else {
         return Answer::NoMatch(NoMatch { reason: NoMatchReason::WriteNotRecorded, nearest: Vec::new() });
     };

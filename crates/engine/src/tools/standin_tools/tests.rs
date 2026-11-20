@@ -158,9 +158,14 @@ fn a_write_moves_later_reads_on_over_loopback() {
         let again = http(&url, "POST /todos HTTP/1.1\r\nHost: {HOST}\r\nContent-Length: 2\r\n\r\n{}");
         assert!(again.starts_with("HTTP/1.1 404") && again.contains("write_not_recorded") && again.contains("No write like this was recorded"), "{again}");
         assert!(get(&url, "/todos").contains(r#"{"todos":[1]}"#), "a refused write changes nothing");
+        // Every refused write is counted, whatever the recording lacks; a read with no answer isn't.
+        let elsewhere = http(&url, "POST /elsewhere HTTP/1.1\r\nHost: {HOST}\r\nContent-Length: 2\r\n\r\n{}");
+        assert!(elsewhere.starts_with("HTTP/1.1 404") && elsewhere.contains("path_not_recorded"), "{elsewhere}");
+        let unread = http(&url, "GET /elsewhere HTTP/1.1\r\nHost: {HOST}\r\n\r\n");
+        assert!(unread.starts_with("HTTP/1.1 404"), "{unread}");
         let shown = call(&e, "web_standin_show", json!({})).unwrap();
-        assert_eq!(shown["result"]["servers"][0]["writes_refused"], 1, "{shown}");
-        assert_eq!(shown["result"]["servers"][0]["requests_with_no_answer"], 1, "{shown}");
+        assert_eq!(shown["result"]["servers"][0]["writes_refused"], 2, "{shown}");
+        assert_eq!(shown["result"]["servers"][0]["requests_with_no_answer"], 3, "{shown}");
 
         // Started again, it goes back to the beginning.
         call(&e, "web_standin_stop", json!({})).unwrap();

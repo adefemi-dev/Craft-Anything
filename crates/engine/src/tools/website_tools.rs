@@ -222,13 +222,16 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     let r = navigate(&mut client, &url, p.width, p.height, p.settle_ms, &dl)
         .and_then(|health| Ok((health.get("dialog_open").is_none().then(|| page_facts(&mut client, &dl)).transpose()?, health)));
     let waiting = client.waiting_dialog().map(dialog_open);
+    // The page that asked (the opening's frame address): with no facts read, that's where the
+    // page is, which may still be the previous page if it asked before the navigation took.
+    let asked_at = client.waiting_dialog().and_then(|d| d.get("url")).and_then(Value::as_str).filter(|u| !u.is_empty()).map(str::to_string);
     match &waiting {
         Some(open) => hold(&site, open.clone(), client),
         None => cleanup(&mut client, &dl),
     }
     let (facts, health) = r?;
     let facts = facts.unwrap_or(Value::Null);
-    let final_url = facts.get("url").and_then(Value::as_str).unwrap_or(&url).to_string();
+    let final_url = page_at(&facts, asked_at, &url);
     if let Ok(mut u) = site.url.lock() {
         u.clone_from(&final_url);
     }
@@ -250,7 +253,7 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     let title = facts.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
     let shown = shown_url(&final_url);
     let how = if want.is_some() { " signed in" } else { "" };
-    let opened = if title.is_empty() { format!("Opened {shown}{how}.") } else { format!("Opened {shown}{how}: \"{title}\".") };
+    let opened = opened_said(&shown_url(&url), &shown, how, &title, waiting.is_some());
     let count = |k: &str| health.get(k).and_then(Value::as_array).map_or(0, Vec::len);
     let summary = match (count("errors"), count("failed_requests")) {
         (0, 0) => opened,
@@ -279,6 +282,25 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
         None => ev.coverage(Coverage::complete(1)),
     };
     Ok(ToolOutput::evidence(ev.build()?))
+}
+
+/// Where the page is after [`navigate`]: what its facts read, else the address of the frame that
+/// asked the question it's waiting on (with nothing read, the page that asked may still be the
+/// previous one), else the address requested.
+fn page_at(facts: &Value, asked_at: Option<String>, requested: &str) -> String {
+    facts.get("url").and_then(Value::as_str).map(str::to_string).or(asked_at).unwrap_or_else(|| requested.to_string())
+}
+
+/// The summary's first sentence for `web_site_open`: "Opened" only when the page is the one
+/// requested, not when another page's question stopped it first.
+fn opened_said(requested: &str, shown: &str, how: &str, title: &str, waiting: bool) -> String {
+    if waiting && shown != requested {
+        format!("Didn't reach {requested}{how}: the page at {shown} asked a question first.")
+    } else if title.is_empty() {
+        format!("Opened {shown}{how}.")
+    } else {
+        format!("Opened {shown}{how}: \"{title}\".")
+    }
 }
 
 /// A question the page is waiting on, kept with the connection that saw it open. Only that
@@ -537,7 +559,9 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
         return Err(ToolError::new(ErrorCode::ProgramFailed, format!("the page didn't load: {err}"))
             .with_remediation("Check the address and your internet connection, then try again."));
     }
-    wait_for_page(client, settle_ms, &mut seen, dl)?;
+    // A navigation to a new document names its loader: only that document's load ends the wait.
+    let loader = r.get("loaderId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    wait_for_page(client, settle_ms, loader.as_deref(), &mut seen, dl)?;
     for domain in ["Network.disable", "Log.disable"] {
         let _ = client.call(domain, json!({}), None, dl);
     }
@@ -546,24 +570,36 @@ pub(crate) fn navigate(client: &mut CdpClient, url: &str, width: u32, height: u3
 
 /// Wait for the load event (at most 45 s, bounded by the overall deadline), then let late content
 /// settle, keeping the events [`page_health`] reads. A question the page asks ends the wait.
-fn wait_for_page(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
+/// With `loader` (the `loaderId` `Page.navigate` returned), a load event counts only after the
+/// main frame committed that document (`Page.frameNavigated`), so the previous page finishing its
+/// own load while the navigation was sent can't end the wait.
+fn wait_for_page(client: &mut CdpClient, settle_ms: u64, loader: Option<&str>, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
     let loaded = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
-    let mut keep = |events: Vec<CdpEvent>| {
-        let wanted = events.into_iter().filter(|e| {
-            e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING
-        });
-        seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
+    let mut committed = loader.is_none();
+    // In order: a load event before this document committed is the previous page's.
+    let mut finished = |events: &[CdpEvent]| {
+        let mut done = false;
+        for e in events {
+            match e.method.as_str() {
+                "Page.frameNavigated" if e.params["frame"].get("parentId").is_none() && loader.is_some_and(|l| e.params["frame"]["loaderId"] == l) => {
+                    committed = true;
+                }
+                "Page.loadEventFired" if committed => done = true,
+                _ => {}
+            }
+        }
+        done
     };
     // A load that finished while Page.navigate was answered is in the queue already.
     let queued = client.take_events();
-    let mut done = queued.iter().any(|e| e.method == "Page.loadEventFired");
-    keep(queued);
+    let mut done = finished(&queued);
+    keep_health_events(seen, queued);
     while !done && client.waiting_dialog().is_none() && !loaded.expired() && !dl.expired() {
         let slice = Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default());
         client.pump_until(&slice)?;
         let events = client.take_events();
-        done = events.iter().any(|e| e.method == "Page.loadEventFired");
-        keep(events);
+        done = finished(&events);
+        keep_health_events(seen, events);
     }
     // In slices, so a question asked while the page settles ends the wait too.
     let settled = std::time::Instant::now() + Duration::from_millis(settle_ms.min(30_000));
@@ -573,7 +609,7 @@ fn wait_for_page(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent
             break;
         }
         client.pump_until(&Deadline::new(left.min(Duration::from_millis(250)), crate::tool::CancelToken::default()))?;
-        keep(client.take_events());
+        keep_health_events(seen, client.take_events());
     }
     Ok(())
 }
@@ -697,9 +733,28 @@ pub(crate) fn eval(client: &mut CdpClient, script: &str, dl: &Deadline) -> Resul
     let r = client.call("Runtime.evaluate", json!({"expression": script, "returnByValue": true, "awaitPromise": true}), None, dl)?;
     if let Some(ex) = r.get("exceptionDetails") {
         let m = ex.pointer("/exception/description").or_else(|| ex.get("text")).and_then(Value::as_str).unwrap_or("script error");
-        return Err(ToolError::new(ErrorCode::ProgramFailed, format!("reading the page failed: {}", m.lines().next().unwrap_or(m))));
+        // The text is the page's own (its script threw), so it's marked: a caller that must not
+        // keep page text can tell this failure apart from a timeout or a lost connection.
+        return Err(ToolError::new(ErrorCode::ProgramFailed, format!("reading the page failed: {}", m.lines().next().unwrap_or(m)))
+            .with_details(json!({PAGE_SCRIPT_FAILED: true})));
     }
     Ok(r.pointer("/result/value").cloned().unwrap_or(Value::Null))
+}
+
+/// The detail [`eval`] sets on an error whose message is the page's own exception text.
+const PAGE_SCRIPT_FAILED: &str = "page_script_failed";
+
+/// Whether `e` is [`eval`]'s failure of the page's script, carrying the page's own text.
+fn page_script_failed(e: &ToolError) -> bool {
+    e.details.as_ref().and_then(|d| d.get(PAGE_SCRIPT_FAILED)).and_then(Value::as_bool) == Some(true)
+}
+
+/// The browser events a page's health reads ([`page_health`]), kept up to [`MAX_HEALTH_EVENTS`].
+fn keep_health_events(seen: &mut Vec<CdpEvent>, events: Vec<CdpEvent>) {
+    let wanted = events
+        .into_iter()
+        .filter(|e| e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING);
+    seen.extend(wanted.take(MAX_HEALTH_EVENTS.saturating_sub(seen.len())));
 }
 
 fn page_facts(client: &mut CdpClient, dl: &Deadline) -> Result<Value, ToolError> {
@@ -795,41 +850,47 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
     };
     let asked = Some(asked);
     let mut unread: Option<String> = None;
-    let r = (|| -> Result<(Value, Value), ToolError> {
+    let r = (|| -> Result<(Value, Value, bool), ToolError> {
         client.call("Page.enable", json!({}), None, &dl)?;
         for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
             let _ = client.call(domain, json!({}), None, &dl);
         }
-        wait_after_answer(&mut client, p.settle_ms, &mut seen, &dl)?;
+        let loading = wait_after_answer(&mut client, p.settle_ms, &mut seen, &dl)?;
         let health = health_with_dialog(&client, &seen);
         if health.get("dialog_open").is_some() {
-            return Ok((health, Value::Null));
+            return Ok((health, Value::Null, false));
         }
         // A read started with no time left fails before it's sent: say so instead.
         if dl.expired() {
             return Err(ToolError::new(ErrorCode::TimedOut, "no time was left to read it"));
         }
         let facts = page_facts(&mut client, &dl)?;
-        Ok((health, facts))
+        // What the page reported while it was read (a console error) belongs to its health too.
+        keep_health_events(&mut seen, client.take_events());
+        Ok((health_with_dialog(&client, &seen), facts, loading))
     })();
     // A question asked while we set up or read the page is held by the client: the page stopped
     // there. Its opening may still be queued; read it now with what was seen before, or the next
     // answer would take it for something said after.
     let r = match r {
         Err(_) if client.waiting_dialog().is_some() => {
-            seen.extend(client.take_events());
-            Ok((health_with_dialog(&client, &seen), Value::Null))
+            keep_health_events(&mut seen, client.take_events());
+            Ok((health_with_dialog(&client, &seen), Value::Null, false))
         }
         // The answer is given either way: a failure to read the page after it (out of time, a
         // lost connection) is said with the answer, not returned as the tool failing, which would
-        // leave a retry nothing to answer.
+        // leave a retry nothing to answer. The page's own exception text isn't kept: it could
+        // repeat what was typed into the prompt, which the evidence leaves out.
         Err(e) => {
-            unread = Some(e.message);
-            seen.extend(client.take_events());
-            Ok((health_with_dialog(&client, &seen), Value::Null))
+            unread = Some(if page_script_failed(&e) { "the page's script failed while it was read".to_string() } else { e.message });
+            keep_health_events(&mut seen, client.take_events());
+            Ok((health_with_dialog(&client, &seen), Value::Null, false))
         }
         r => r,
     };
+    // The wait ended at its bound with a frame still loading: what was read may be mid-load.
+    let still_loading = matches!(&r, Ok((_, _, true)));
+    let r = r.map(|(h, f, _)| (h, f));
     let next = client.waiting_dialog().map(dialog_open);
     match &next {
         Some(open) => hold(&site, open.clone(), client),
@@ -900,6 +961,12 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
                     format!("The answer was given, but the page wasn't read afterwards ({why}); open the website again with web_site_open to see where it is."),
                 ))
                 .coverage(Coverage { status: CoverageStatus::Partial, examined: Some(0), total: Some(1), next_offset: None }),
+            None if still_loading => ev
+                .limitation(Limitation::new(
+                    "page_still_loading",
+                    "The page was still loading when the wait after the answer ended (45 s at most), so what was read may change as it finishes; open the website again with web_site_open to see it settled.",
+                ))
+                .coverage(Coverage { status: CoverageStatus::Partial, examined: Some(1), total: Some(1), next_offset: None }),
             None => ev.coverage(Coverage::complete(1)),
         },
     };
@@ -907,25 +974,34 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
 }
 
 /// After an answer the page may go on loading (a navigation it asked about) or stay where it is:
-/// wait for a load that started, at most 45 s, and at least `settle_ms`.
-fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<(), ToolError> {
+/// wait for a load that started, at most `AFTER_ANSWER_LOAD_WAIT`, and at least `settle_ms`.
+/// True when the wait ended with a frame still loading (its bound reached, or the deadline): the
+/// page may be read mid-load, which the result says.
+fn wait_after_answer(client: &mut CdpClient, settle_ms: u64, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<bool, ToolError> {
+    wait_after_answer_within(client, settle_ms, AFTER_ANSWER_LOAD_WAIT, seen, dl)
+}
+
+/// The longest wait for a page's load after an answer.
+const AFTER_ANSWER_LOAD_WAIT: Duration = Duration::from_secs(45);
+
+fn wait_after_answer_within(client: &mut CdpClient, settle_ms: u64, bound: Duration, seen: &mut Vec<CdpEvent>, dl: &Deadline) -> Result<bool, ToolError> {
     let quiet = Deadline::new(Duration::from_millis(settle_ms.min(30_000)), crate::tool::CancelToken::default());
-    let longest = Deadline::new(Duration::from_secs(45), crate::tool::CancelToken::default());
+    let longest = Deadline::new(bound, crate::tool::CancelToken::default());
     // Frame loads are tracked by the client as its events arrive (CdpClient::frames_loading), so
     // a load that started before the answer, or before an earlier question, is still waited for.
     // The events that came while the answer and setup awaited their replies are read first, so
     // no settle time (settle_ms: 0) skips only the extra wait, not what was already seen.
     let mut queued = client.take_events();
     loop {
-        for e in queued {
-            let wanted =
-                e.method.starts_with("Runtime.") || e.method.starts_with("Log.") || e.method.starts_with("Network.") || e.method == cdp::DIALOG_OPENING;
-            if wanted && seen.len() < MAX_HEALTH_EVENTS {
-                seen.push(e);
-            }
+        keep_health_events(seen, queued);
+        if client.waiting_dialog().is_some() {
+            return Ok(false);
         }
-        if client.waiting_dialog().is_some() || longest.expired() || dl.expired() || (!client.frames_loading() && quiet.expired()) {
-            return Ok(());
+        if !client.frames_loading() && quiet.expired() {
+            return Ok(false);
+        }
+        if longest.expired() || dl.expired() {
+            return Ok(client.frames_loading());
         }
         client.pump_until(&Deadline::new(Duration::from_millis(250), crate::tool::CancelToken::default()))?;
         queued = client.take_events();
@@ -2490,6 +2566,119 @@ mod tests {
         assert_eq!(stored_health(&e)["dialogs"][0]["answered"], "accepted");
     }
 
+    /// #2019 review: a question that stops a navigation is reported with the page that asked it,
+    /// not as the requested page opened.
+    #[test]
+    fn a_question_before_the_navigation_names_the_page_that_asked() {
+        let none = Value::Null;
+        assert_eq!(page_at(&none, Some("https://old.test/a".into()), "https://new.test/"), "https://old.test/a");
+        assert_eq!(page_at(&json!({"url": "https://new.test/x"}), Some("https://old.test/a".into()), "https://new.test/"), "https://new.test/x");
+        assert_eq!(page_at(&none, None, "https://new.test/"), "https://new.test/");
+        let s = opened_said("https://new.test/", "https://old.test/a", "", "", true);
+        assert!(s.starts_with("Didn't reach https://new.test/") && s.contains("https://old.test/a asked a question first"), "{s}");
+        assert_eq!(opened_said("https://new.test/", "https://new.test/", "", "", true), "Opened https://new.test/.", "the new page asked");
+        assert_eq!(opened_said("https://new.test/", "https://new.test/", "", "Home", false), "Opened https://new.test/: \"Home\".");
+    }
+
+    /// #2019 review: a console error the page reports while its facts are read is in the answer's
+    /// health and the stored health, not dropped because the read succeeded.
+    #[test]
+    fn an_error_while_the_page_is_read_is_in_its_health() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            let read = reply_until(s, |m| m["method"] == "Runtime.evaluate").unwrap();
+            send_frame(s, json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"value": "late failure"}]}}));
+            send_frame(s, json!({"id": read["id"], "result": {"result": {"type": "object", "value": {"url": "http://page.test/done", "title": "Done"}}}}));
+            let _ = reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["title"], "Done", "{done}");
+        let has = |h: &Value| h["errors"].as_array().is_some_and(|es| es.iter().any(|x| x["text"] == "late failure"));
+        assert!(has(&done["result"]["health"]), "in the answer's health: {done}");
+        assert!(has(&stored_health(&e)), "in the stored health: {}", stored_health(&e));
+    }
+
+    /// #2019 review: when the page's own script fails as it's read after an answer, its exception
+    /// text (which could repeat what was typed into a prompt) is kept out of the evidence.
+    #[test]
+    fn a_page_script_failure_after_an_answer_keeps_its_text_out() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "prompt", "message": "Your code?", "defaultPrompt": ""}}));
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            let read = reply_until(s, |m| m["method"] == "Runtime.evaluate").unwrap();
+            let thrown = json!({"exceptionDetails": {"text": "Uncaught", "exception": {"description": "Error: bad code SECRET-4321"}}});
+            send_frame(s, json!({"id": read["id"], "result": thrown}));
+            let _ = reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        let done = answer(&e, json!({"accept": true, "prompt_text": "SECRET-4321", "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["answered"]["accept"], true, "{done}");
+        assert_eq!(done["coverage"]["status"], "partial", "{done}");
+        assert!(!done.to_string().contains("SECRET-4321"), "the page's text was kept: {done}");
+        assert!(done["summary"].as_str().unwrap().contains("the page's script failed"), "{}", done["summary"]);
+    }
+
+    /// A timeout keeps its own reason: only the page's script text is replaced.
+    #[test]
+    fn only_a_page_script_failure_is_marked() {
+        let thrown = ToolError::new(ErrorCode::ProgramFailed, "reading the page failed: x").with_details(json!({PAGE_SCRIPT_FAILED: true}));
+        assert!(page_script_failed(&thrown));
+        assert!(!page_script_failed(&ToolError::new(ErrorCode::TimedOut, "out of time")));
+    }
+
+    /// #2019 review: a wait that reaches its bound with a frame still loading says so; one whose
+    /// frames stopped doesn't.
+    #[test]
+    fn a_wait_that_ends_mid_load_says_so() {
+        let (mut client, _) = stand_in_page(|s| {
+            send_frame(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+        });
+        let dl = Deadline::new(Duration::from_secs(10), crate::tool::CancelToken::default());
+        let mut seen = Vec::new();
+        client.pump_until(&Deadline::new(Duration::from_millis(300), crate::tool::CancelToken::default())).unwrap();
+        let started = std::time::Instant::now();
+        assert!(wait_after_answer_within(&mut client, 0, Duration::from_millis(700), &mut seen, &dl).unwrap(), "F never stopped");
+        assert!(started.elapsed() >= Duration::from_millis(600), "waited to its bound: {:?}", started.elapsed());
+        let (mut quiet, _) = stand_in_page(|s| {
+            send_frame(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+            send_frame(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "F"}}));
+        });
+        quiet.pump_until(&Deadline::new(Duration::from_millis(300), crate::tool::CancelToken::default())).unwrap();
+        assert!(!wait_after_answer_within(&mut quiet, 0, Duration::from_millis(700), &mut seen, &dl).unwrap(), "F stopped");
+    }
+
+    /// #2019 review: the previous page's load event, arriving while the navigation is sent, doesn't
+    /// end the wait for the new document; only a load after that document committed does.
+    #[test]
+    fn the_previous_pages_load_doesnt_end_the_wait() {
+        let (mut client, _) = stand_in_page(|s| {
+            send_frame(s, json!({"method": "Page.loadEventFired", "params": {}}));
+            std::thread::sleep(Duration::from_millis(800));
+            send_frame(s, json!({"method": "Page.frameNavigated", "params": {"frame": {"id": "M", "loaderId": "OTHER"}}}));
+            send_frame(s, json!({"method": "Page.frameNavigated", "params": {"frame": {"id": "C", "parentId": "M", "loaderId": "L2"}}}));
+            send_frame(s, json!({"method": "Page.loadEventFired", "params": {}}));
+            std::thread::sleep(Duration::from_millis(400));
+            send_frame(s, json!({"method": "Page.frameNavigated", "params": {"frame": {"id": "M", "loaderId": "L2"}}}));
+            send_frame(s, json!({"method": "Page.loadEventFired", "params": {}}));
+        });
+        let dl = Deadline::new(Duration::from_secs(10), crate::tool::CancelToken::default());
+        client.pump_until(&Deadline::new(Duration::from_millis(200), crate::tool::CancelToken::default())).unwrap();
+        let started = std::time::Instant::now();
+        wait_for_page(&mut client, 0, Some("L2"), &mut Vec::new(), &dl).unwrap();
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(800) && took < Duration::from_secs(5), "ended at the new document's load: {took:?}");
+        // Without a loader (a same-document navigation), the first load event ends it.
+        let (mut same, _) = stand_in_page(|s| send_frame(s, json!({"method": "Page.loadEventFired", "params": {}})));
+        same.pump_until(&Deadline::new(Duration::from_millis(200), crate::tool::CancelToken::default())).unwrap();
+        let started = std::time::Instant::now();
+        wait_for_page(&mut same, 0, None, &mut Vec::new(), &dl).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+    }
+
     /// #2019 review: an answer that runs out of time keeps the question for another try, and the
     /// try reads what that answer did instead of sending one that would land on the next question.
     #[test]
@@ -2532,7 +2721,7 @@ mod tests {
         let dl = Deadline::new(Duration::from_secs(30), crate::tool::CancelToken::default());
         let mut seen = Vec::new();
         let started = std::time::Instant::now();
-        wait_for_page(&mut client, 20_000, &mut seen, &dl).unwrap();
+        wait_for_page(&mut client, 20_000, None, &mut seen, &dl).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5), "ended at the question: {:?}", started.elapsed());
         assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("confirm")));
         assert!(seen.iter().any(|e| e.method == cdp::DIALOG_OPENING), "the question is among the events read");

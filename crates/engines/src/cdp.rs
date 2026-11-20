@@ -1244,17 +1244,29 @@ mod tests {
             for i in 0..MAX_LOADING_FRAMES {
                 send(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": format!("f{i}")}}));
             }
-            let _ = receive(s);
+            probe_reply(s);
         });
-        client.pump_until(&Deadline::new(Duration::from_millis(500), CancelToken::default())).unwrap();
+        // The probe's reply comes after every event, so all of them have been read.
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.call("Probe.read", json!({}), None, &dl).unwrap();
+        assert!(client.loading_frames.is_empty(), "every tracked frame stopped, so only the dropped start keeps it loading");
         assert!(client.frames_loading(), "the frame past the cap may still be loading");
         let mut few = stand_in(|s| {
             send(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+            probe_reply(s);
             send(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "F"}}));
-            let _ = receive(s);
+            probe_reply(s);
         });
-        few.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        few.call("Probe.read", json!({}), None, &dl).unwrap();
+        assert!(few.frames_loading(), "the start was read");
+        few.call("Probe.read", json!({}), None, &dl).unwrap();
         assert!(!few.frames_loading(), "every tracked frame stopped");
+    }
+
+    /// Reply to the client's next command, after the events sent before it.
+    fn probe_reply(s: &mut TcpStream) {
+        let m = receive(s);
+        send(s, json!({"id": m["id"], "result": {}}));
     }
 
     #[test]

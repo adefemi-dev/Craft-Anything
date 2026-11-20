@@ -45,7 +45,8 @@ const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 pub fn search_path() -> Option<OsString> {
     let local_data = cfg!(windows).then(|| std::env::var_os("LOCALAPPDATA")).flatten().map(PathBuf::from);
     let path = std::env::var_os("PATH");
-    let path = if cfg!(windows) { path.map(|p| expand_vars(&p, |name| std::env::var_os(name))) } else { path };
+    #[cfg(windows)]
+    let path = path.map(|p| expand_vars(&p, |name| std::env::var_os(name)));
     with_usual_dirs(path, std::env::var_os(HOME_VAR).map(PathBuf::from), local_data)
 }
 

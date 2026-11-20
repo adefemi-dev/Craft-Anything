@@ -1182,12 +1182,14 @@ mod tests {
     /// connection says so.
     #[test]
     fn an_answer_tells_a_refusal_from_no_word() {
-        let mut client = stand_in(|s| {
+        // The late reply is released only once the first call has timed out.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut client = stand_in(move |s| {
             send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
             // The first answer is taken late, after its call ran out of time, and the page asks next.
             let first = receive(s);
             assert_eq!(first["params"]["accept"], true);
-            std::thread::sleep(Duration::from_millis(600));
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
             send(s, json!({"id": first["id"], "result": {}}));
             send(s, json!({"method": DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": ""}}));
             // The retry sent nothing: the next answer to arrive is the one given to the prompt,
@@ -1204,6 +1206,7 @@ mod tests {
         let late = client.answer_dialog(json!({"accept": true}), &short).unwrap_err();
         assert_eq!(late.code, ErrorCode::TimedOut, "{late:?}");
         assert!(client.connected() && client.waiting_dialog().is_some(), "the question and its connection are kept for another try");
+        release.send(()).unwrap();
         // The retry's own choice differs: what's reported is the answer the page took.
         assert!(
             matches!(client.answer_dialog(json!({"accept": false}), &dl), Ok(DialogAnswer::AnsweredBefore { accept: Some(true) })),
@@ -1224,10 +1227,11 @@ mod tests {
     /// A late reply that refuses the earlier answer means the question was already gone.
     #[test]
     fn a_late_refusal_settles_an_earlier_answer() {
-        let mut client = stand_in(|s| {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut client = stand_in(move |s| {
             send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
             let first = receive(s);
-            std::thread::sleep(Duration::from_millis(600));
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
             send(s, json!({"id": first["id"], "error": {"code": -32000, "message": "No dialog is showing"}}));
             // Nothing else is sent to the page.
             let _ = receive(s);
@@ -1237,6 +1241,7 @@ mod tests {
         client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
         let short = Deadline::new(Duration::from_millis(300), CancelToken::default());
         assert_eq!(client.answer_dialog(json!({"accept": true}), &short).unwrap_err().code, ErrorCode::TimedOut);
+        release.send(()).unwrap();
         match client.answer_dialog(json!({"accept": false}), &dl) {
             Ok(DialogAnswer::NotShowing(e)) => assert!(e.message.contains("No dialog is showing"), "{}", e.message),
             other => panic!("expected the earlier answer's refusal, got {other:?}"),

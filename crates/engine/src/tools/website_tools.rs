@@ -67,7 +67,7 @@ pub fn specs() -> Vec<ToolSpec> {
         spec(
             DIALOG_ANSWER_TOOL,
             "Answer a page's question",
-            "Answer the confirm or prompt the open website is waiting on (web_site_open and web_site_capture report one as dialog_open; nothing in the page runs until it's answered): accept: true agrees (OK), false dismisses (Cancel); prompt_text is typed into a prompt before it's accepted and is never kept. Then waits for the page to settle and reports where it ended up, including the next question if it asks one. Agreeing lets the site do what it asked, so it needs your approval.",
+            "Answer the confirm or prompt the open website is waiting on (web_site_open and web_site_capture report one as dialog_open; nothing in the page runs until it's answered): accept: true agrees (OK), false dismisses (Cancel); prompt_text is typed into a prompt before it's accepted; the parameter itself isn't kept in the evidence (only whether one was given), but what the page shows or logs afterwards (its title, a console error) can repeat it. Then waits for the page to settle and reports where it ended up, including the next question if it asks one. Agreeing lets the site do what it asked, so it needs your approval.",
             "Click OK or Cancel on a question the website is asking.",
             Toolset::Browser,
             Effects::EVIDENCE.union(Effects::EXECUTES_FOREIGN_CODE).union(Effects::ACCESSES_NETWORK).union(Effects::MUTATES_SESSION),
@@ -219,8 +219,7 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     release_held(&site);
     let mut client = page_client(&site, &dl)?;
     // A page waiting on a question can't be read: its facts wait for the answer.
-    let r = navigate(&mut client, &url, p.width, p.height, p.settle_ms, &dl)
-        .and_then(|health| Ok((health.get("dialog_open").is_none().then(|| page_facts(&mut client, &dl)).transpose()?, health)));
+    let r = navigate(&mut client, &url, p.width, p.height, p.settle_ms, &dl).and_then(|health| facts_unless_asked(&mut client, health, &dl));
     let waiting = client.waiting_dialog().map(dialog_open);
     // The page that asked (the opening's frame address): with no facts read, that's where the
     // page is, which may still be the previous page if it asked before the navigation took.
@@ -284,6 +283,24 @@ fn web_site_open(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolErr
     Ok(ToolOutput::evidence(ev.build()?))
 }
 
+/// The page's facts after [`navigate`] (none while it waits on a question), with its health. A
+/// question asked while the facts are read stops the read there: it's reported as one asked while
+/// the page loaded, with what the page said before it. Other read failures are returned.
+fn facts_unless_asked(client: &mut CdpClient, health: Value, dl: &Deadline) -> Result<(Option<Value>, Value), ToolError> {
+    if health.get("dialog_open").is_some() {
+        return Ok((None, health));
+    }
+    match page_facts(client, dl) {
+        Ok(facts) => Ok((Some(facts), health)),
+        Err(_) if client.waiting_dialog().is_some() => {
+            let mut seen = Vec::new();
+            keep_health_events(&mut seen, client.take_events());
+            Ok((None, merge_health(health, &health_with_dialog(client, &seen))))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Where the page is after [`navigate`]: what its facts read, else the address of the frame that
 /// asked the question it's waiting on (with nothing read, the page that asked may still be the
 /// previous one), else the address requested.
@@ -295,7 +312,8 @@ fn page_at(facts: &Value, asked_at: Option<String>, requested: &str) -> String {
 /// requested, not when another page's question stopped it first.
 fn opened_said(requested: &str, shown: &str, how: &str, title: &str, waiting: bool) -> String {
     if waiting && shown != requested {
-        format!("Didn't reach {requested}{how}: the page at {shown} asked a question first.")
+        // A redirect or the previous page: which one, nothing read here can tell.
+        format!("Went to {requested}{how}; the page at {shown} asked a question before it could be read.")
     } else if title.is_empty() {
         format!("Opened {shown}{how}.")
     } else {
@@ -622,10 +640,16 @@ fn health_after_answer(stored: &Value, accept: bool, after: &Value) -> Value {
         Value::Object(_) => stored.clone(),
         _ => json!({"errors": [], "failed_requests": []}),
     };
-    let Some(o) = health.as_object_mut() else { return health };
-    if let Some(d) = o.get_mut("dialogs").and_then(Value::as_array_mut).and_then(|ds| ds.iter_mut().rev().find(|d| d["answered"] == "waiting")) {
+    if let Some(d) = health.get_mut("dialogs").and_then(Value::as_array_mut).and_then(|ds| ds.iter_mut().rev().find(|d| d["answered"] == "waiting")) {
         d["answered"] = json!(if accept { "accepted" } else { "dismissed" });
     }
+    merge_health(health, after)
+}
+
+/// `health` with what the page reported later (`after`, a [`page_health`]) added, capped as
+/// [`page_health`] caps it, and `after`'s question (or none) as `dialog_open`.
+fn merge_health(mut health: Value, after: &Value) -> Value {
+    let Some(o) = health.as_object_mut() else { return health };
     for (key, cap) in [("errors", 30), ("failed_requests", 50), ("dialogs", 30)] {
         let Some(new) = after.get(key).and_then(Value::as_array) else { continue };
         let list = o.entry(key).or_insert_with(|| json!([]));
@@ -782,7 +806,8 @@ const MAX_PROMPT_TEXT: usize = 10_000;
 pub struct DialogAnswerParams {
     /// true agrees (OK), false dismisses (Cancel).
     pub accept: bool,
-    /// For a prompt: the text to answer with (accepted only). Never kept in the evidence.
+    /// For a prompt: the text to answer with (accepted only). Not kept in the evidence itself;
+    /// what the page shows or logs afterwards (its title, a console error) can repeat it.
     #[serde(default)]
     pub prompt_text: Option<String>,
     /// Extra time to let the page settle after the answer, in milliseconds (default 2000).
@@ -803,7 +828,13 @@ fn web_page_dialog_answer(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput
             .with_remediation("Pass accept: true with prompt_text, or leave prompt_text out."));
     }
     let dl = deadline(ctx, p.timeout_secs)?;
-    let site = open_site(ctx, &dl)?;
+    // A held question is answered on its own connection, which says itself if the browser is gone.
+    // The liveness probe isn't asked first: one that fails would drop the site, and with it the
+    // only connection that can read an earlier answer the browser hadn't confirmed.
+    let site = match ctx.session.ext.get::<SiteBrowser>().filter(|s| held_dialog(s).is_some()) {
+        Some(site) => site,
+        None => open_site(ctx, &dl)?,
+    };
     // Only the connection that saw the question can answer it (HeldDialog).
     let Some(HeldDialog { open: asked, mut client }) = take_held(&site) else {
         return Err(ToolError::new(ErrorCode::NotFound, "The page isn't waiting on a question, so there's nothing to answer.")
@@ -2575,9 +2606,84 @@ mod tests {
         assert_eq!(page_at(&json!({"url": "https://new.test/x"}), Some("https://old.test/a".into()), "https://new.test/"), "https://new.test/x");
         assert_eq!(page_at(&none, None, "https://new.test/"), "https://new.test/");
         let s = opened_said("https://new.test/", "https://old.test/a", "", "", true);
-        assert!(s.starts_with("Didn't reach https://new.test/") && s.contains("https://old.test/a asked a question first"), "{s}");
+        assert_eq!(s, "Went to https://new.test/; the page at https://old.test/a asked a question before it could be read.");
         assert_eq!(opened_said("https://new.test/", "https://new.test/", "", "", true), "Opened https://new.test/.", "the new page asked");
         assert_eq!(opened_said("https://new.test/", "https://new.test/", "", "Home", false), "Opened https://new.test/: \"Home\".");
+    }
+
+    /// #2019 review: a question the page asks while web_site_open reads its facts is reported as
+    /// the question, with the page's earlier health kept; a read failure without one is returned.
+    #[test]
+    fn a_question_while_the_facts_are_read_is_reported() {
+        let (mut client, _) = stand_in_page(|s| {
+            let read = read_frame(s).unwrap();
+            assert_eq!(read["method"], "Runtime.evaluate");
+            send_frame(s, json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"value": "boom"}]}}));
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Stay?", "url": "http://page.test/"}}));
+            let _ = reply_until(s, |_| false);
+        });
+        let dl = Deadline::new(Duration::from_secs(5), crate::tool::CancelToken::default());
+        let before = json!({"errors": [{"kind": "script", "text": "earlier", "url": ""}], "failed_requests": []});
+        let (facts, health) = facts_unless_asked(&mut client, before, &dl).unwrap();
+        assert!(facts.is_none());
+        assert_eq!(health["dialog_open"]["message"], "Stay?", "{health}");
+        assert_eq!(health["dialogs"][0]["answered"], "waiting", "{health}");
+        let texts = health["errors"].to_string();
+        assert!(texts.contains("earlier") && texts.contains("boom"), "{health}");
+        let (mut lost, _) = stand_in_page(|s| {
+            let _ = read_frame(s);
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        });
+        assert!(facts_unless_asked(&mut lost, json!({"errors": [], "failed_requests": []}), &dl).is_err());
+    }
+
+    /// #2019 review: a retry whose liveness probe fails still answers on the held connection,
+    /// which is the only one that can read an earlier answer.
+    #[test]
+    fn a_held_question_is_answered_without_the_liveness_probe() {
+        let (client, _) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            let _ = reply_until(s, |_| false);
+        });
+        // The site's endpoint hangs up on every request, so /json/version fails; the page
+        // connection is fine. The listener stays bound for the whole test.
+        let mute = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = mute.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for c in mute.incoming().flatten() {
+                drop(c);
+            }
+        });
+        let gone = cdp::parse_endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
+        let e = engine_held(client, &gone);
+        let done = answer(&e, json!({"accept": true, "settle_ms": 100})).unwrap();
+        assert_eq!(done["result"]["answered"]["accept"], true, "{done}");
+        assert_eq!(done["result"]["title"], "Done", "{done}");
+    }
+
+    /// #2019 review: the typed text isn't kept as a parameter, and what the page itself shows
+    /// or logs afterwards is reported as the page's (the narrow guarantee the tool states).
+    #[test]
+    fn typed_text_the_page_repeats_is_reported_as_the_pages() {
+        let (client, ep) = stand_in_page(|s| {
+            send_frame(s, json!({"method": cdp::DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": ""}}));
+            let first = read_frame(s).unwrap();
+            send_frame(s, json!({"id": first["id"], "result": {}}));
+            send_frame(s, json!({"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [{"value": "unknown team Design-7"}]}}));
+            let read = reply_until(s, |m| m["method"] == "Runtime.evaluate").unwrap();
+            send_frame(
+                s,
+                json!({"id": read["id"], "result": {"result": {"type": "object", "value": {"url": "http://page.test/t", "title": "Team Design-7"}}}}),
+            );
+            let _ = reply_until(s, |_| false);
+        });
+        let e = engine_held(client, &ep);
+        let done = answer(&e, json!({"accept": true, "prompt_text": "Design-7", "settle_ms": 100})).unwrap();
+        assert_eq!(done["params"], json!({"accept": true, "prompt_text_given": true}), "the parameter isn't kept");
+        assert_eq!(done["result"]["title"], "Team Design-7", "the page's own title is reported: {done}");
+        assert!(done["result"]["health"]["errors"].to_string().contains("Design-7"), "the page's own console error is reported: {done}");
     }
 
     /// #2019 review: a console error the page reports while its facts are read is in the answer's

@@ -403,6 +403,14 @@ impl WsConn {
         }
     }
 
+    /// A socket option refused on the open connection: macOS answers `setsockopt` with "Invalid
+    /// argument" once the browser has closed the socket both ways, so this is the connection
+    /// lost, not a fault of ours.
+    fn lost(&mut self, doing: &str, e: &std::io::Error) -> ToolError {
+        self.closed = true;
+        ToolError::new(ErrorCode::EngineMissing, format!("{doing} the browser failed: {e}"))
+    }
+
     /// Send one JSON text message.
     pub fn send_text(&mut self, text: &str, dl: &Deadline) -> Result<(), ToolError> {
         if self.closed {
@@ -431,7 +439,8 @@ impl WsConn {
         for (i, b) in payload.iter().enumerate() {
             frame.push(b ^ mask[i & 3]);
         }
-        self.stream.set_write_timeout(Some(dl.remaining()?)).map_err(|e| ToolError::internal(e.to_string()))?;
+        let wait = dl.remaining()?;
+        self.stream.set_write_timeout(Some(wait)).map_err(|e| self.lost("writing to", &e))?;
         self.stream.write_all(&frame).and_then(|_| self.stream.flush()).map_err(|e| {
             self.closed = true;
             ToolError::new(ErrorCode::EngineMissing, format!("writing to the browser failed: {e}"))
@@ -491,7 +500,7 @@ impl WsConn {
             }
             let wait = dl.remaining()?.min(POLL);
             let mut tmp = [0u8; 32 * 1024];
-            self.stream.set_read_timeout(Some(wait)).map_err(|e| ToolError::internal(e.to_string()))?;
+            self.stream.set_read_timeout(Some(wait)).map_err(|e| self.lost("reading from", &e))?;
             match self.stream.read(&mut tmp) {
                 Ok(0) => {
                     self.closed = true;

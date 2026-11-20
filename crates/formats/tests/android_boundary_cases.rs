@@ -26,7 +26,7 @@ fn arsc_rejects_wrong_root_chunk_type_and_short_header() {
     assert!(matches!(arsc::parse(&wrong_type, arsc::Limits::default()), Err(FormatError::Malformed(_))));
 
     let mut short_header = fx::resources_arsc();
-    short_header[2..4].copy_from_slice(&8u16.to_le_bytes());
+    short_header[2..4].copy_from_slice(&4u16.to_le_bytes());
     assert!(matches!(arsc::parse(&short_header, arsc::Limits::default()), Err(FormatError::Truncated(_) | FormatError::Malformed(_))));
 }
 

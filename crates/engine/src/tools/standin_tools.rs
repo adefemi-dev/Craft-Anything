@@ -64,7 +64,7 @@ pub fn specs() -> Vec<ToolSpec> {
         spec(
             "web_standin_start",
             "Start a stand-in backend",
-            "Answer HTTP requests on this computer from a file written by web_standin_build, and return its URL to point a rebuilt front end at. Listens on 127.0.0.1 only, refuses requests addressed to any other host and pages from other computers, and allows local pages through CORS. Stays running for this session, or until web_standin_stop. A request with no recorded answer gets a 404 with the nearest routes as JSON. A write the original accepted moves later reads of the same path, or of paths above or under it, on to what was recorded after it; nothing is worked out from what is sent. Runs no code from the recording.",
+            "Answer HTTP requests on this computer from a file written by web_standin_build, and return its URL to point a rebuilt front end at. Listens on 127.0.0.1 only, refuses requests addressed to any other host and pages from other computers, and allows local pages through CORS. Stays running for this session, or until web_standin_stop. A request with no recorded answer gets a 404 with the nearest routes as JSON. A write the original accepted moves later reads of the same path, or of paths above or under it, on to what was recorded after it; nothing is worked out from what is sent. A write past the recorded ones of its kind gets a 404 with reason write_not_recorded and changes nothing; web_standin_show counts them in writes_refused. Runs no code from the recording.",
             "Start a local stand-in for a website's backend, answering from a recording.",
             Toolset::Browser,
             Effects::MUTATES_SESSION.union(Effects::ACCESSES_NETWORK),
@@ -276,6 +276,8 @@ struct Log {
     answered_without_body: u64,
     by_route: BTreeMap<String, u64>,
     no_answer: u64,
+    /// Of those, writes the recording has no answer of its own for (`write_not_recorded`).
+    writes_refused: u64,
     missing: BTreeMap<(String, String), MissingRow>,
     missing_not_listed: u64,
 }
@@ -318,6 +320,10 @@ impl Answerer for Replay {
             }
             Answer::NoMatch(n) => {
                 log.no_answer = log.no_answer.saturating_add(1);
+                let refused_write = n.reason == NoMatchReason::WriteNotRecorded;
+                if refused_write {
+                    log.writes_refused = log.writes_refused.saturating_add(1);
+                }
                 // What a client asks for is only its names and path: never query values or bodies.
                 let path = clip(&standin::safe_path(&r.path), MAX_LOGGED_PATH);
                 let key = (r.method.to_ascii_uppercase(), path.clone());
@@ -342,7 +348,11 @@ impl Answerer for Replay {
                         "method": r.method,
                         "path": path,
                         "nearest": n.nearest,
-                        "message": "The recording behind this stand-in has no replayable answer for this request.",
+                        "message": if refused_write {
+                            "No write like this was recorded, so the stand-in can't say how the original answered it: nothing was changed."
+                        } else {
+                            "The recording behind this stand-in has no replayable answer for this request."
+                        },
                     }),
                 );
                 response.headers.push((ANSWER_HEADER.into(), "no-recorded-answer".into()));
@@ -374,6 +384,7 @@ impl Running {
             "requests_answered": log.answered,
             "answered_without_their_body": log.answered_without_body,
             "requests_with_no_answer": log.no_answer,
+            "writes_refused": log.writes_refused,
             "requests_refused": self.server.refused(),
             "recording_position": guard.0.position(),
         })

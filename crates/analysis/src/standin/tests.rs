@@ -636,18 +636,20 @@ fn a_write_moves_later_reads_on_to_what_was_recorded_after_it() {
 }
 
 #[test]
-fn writes_past_the_recording_repeat_its_last_and_time_never_goes_back() {
+fn a_write_past_the_recorded_ones_is_refused_and_time_never_goes_back() {
     let s = notes_recording();
     let mut t = Turns::default();
     for _ in 0..2 {
-        let _ = answer(&s, &mut t, "POST", "/notes", "", b"");
+        let _ = found(answer(&s, &mut t, "POST", "/notes", "", b""));
     }
-    let third = found(answer(&s, &mut t, "POST", "/notes", "", b""));
-    assert_eq!((body(&third).as_str(), third.turn, third.of), (r#"{"id":8}"#, 1, 1), "the last recorded write again");
-    assert_eq!(read_notes(&s, &mut t), r#"{"notes":[7,8]}"#);
+    // No third add was recorded: answering it with a recorded success would say it worked.
+    let third = missing(answer(&s, &mut t, "POST", "/notes", "", b""));
+    assert_eq!(third.reason, NoMatchReason::WriteNotRecorded);
+    assert_eq!(read_notes(&s, &mut t), r#"{"notes":[7,8]}"#, "and it changes nothing");
     // The delete was recorded later than both posts; posting again doesn't take the reads back.
-    let _ = answer(&s, &mut t, "DELETE", "/notes/7", "", b"");
-    let _ = answer(&s, &mut t, "POST", "/notes", "", b"");
+    let _ = found(answer(&s, &mut t, "DELETE", "/notes/7", "", b""));
+    assert_eq!(missing(answer(&s, &mut t, "DELETE", "/notes/7", "", b"")).reason, NoMatchReason::WriteNotRecorded, "nor a second delete");
+    assert_eq!(missing(answer(&s, &mut t, "POST", "/notes", "", b"")).reason, NoMatchReason::WriteNotRecorded);
     assert_eq!(read_notes(&s, &mut t), r#"{"notes":[8]}"#);
     assert_eq!(t.position(), Some(5));
 }
@@ -916,9 +918,9 @@ fn json_bodies_prefer_the_same_names_but_accept_others() {
     let mut t = Turns::default();
     assert!(body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"tag":"other"}"#))).contains("tag"));
     // Any other body may be answered by either. As a write it steps through them, and the `tag`
-    // write before it doesn't move the `q` kind on.
-    let other: Vec<String> = (0..2).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#)))).collect();
-    assert_eq!(other, [r#"{"by":"q"}"#, r#"{"by":"tag"}"#]);
+    // write before it doesn't move the `q` kind on; once both were replayed there's none left.
+    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#))), r#"{"by":"q"}"#);
+    assert_eq!(missing(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#)).reason, NoMatchReason::WriteNotRecorded);
 }
 
 #[test]
@@ -1197,7 +1199,8 @@ fn a_named_operation_answered_by_another_ones_recording_moves_nothing() {
     assert_eq!(post.samples[0].request_key, None, "the hidden name stays out of the file");
     let mut t = Turns::default();
     let clear = br#"{"query":"mutation Clear { clear }","operationName":"Clear"}"#;
-    assert_eq!(body(&found(answer(&s, &mut t, "POST", "/graphql", "", clear))), r#"{"data":{"added":1}}"#, "the recorded answer, as before");
+    // The recording can't say the hidden write was this one: no match, no answer.
+    assert_eq!(missing(answer(&s, &mut t, "POST", "/graphql", "", clear)).reason, NoMatchReason::WriteNotRecorded);
     assert_eq!(t.position(), None);
     assert_eq!(body(&found(get(&s, &mut t, "/graphql", ""))), r#"{"n":0}"#, "later reads stay where they were");
     // Recorded by name, the same operation still steps.
@@ -1218,12 +1221,14 @@ fn a_body_of_another_kind_steps_each_recorded_kind_on_its_own() {
     };
     let s = built(vec![post(r#"{"q":"a"}"#, r#"{"by":"q"}"#), post(r#"{"tag":"b"}"#, r#"{"by":"tag 1"}"#), post(r#"{"tag":"c"}"#, r#"{"by":"tag 2"}"#)]);
     let mut t = Turns::default();
-    let other: Vec<String> = (0..4).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#)))).collect();
-    assert_eq!(other, [r#"{"by":"q"}"#, r#"{"by":"tag 1"}"#, r#"{"by":"tag 2"}"#, r#"{"by":"tag 2"}"#], "past them all, the last one again");
+    let other: Vec<String> = (0..3).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#)))).collect();
+    assert_eq!(other, [r#"{"by":"q"}"#, r#"{"by":"tag 1"}"#, r#"{"by":"tag 2"}"#]);
+    assert_eq!(missing(answer(&s, &mut t, "POST", "/search", "", br#"{"new":1}"#)).reason, NoMatchReason::WriteNotRecorded, "past them all, none");
     // A body of a recorded kind still takes only its own.
     let mut t = Turns::default();
-    let tags: Vec<String> = (0..3).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"tag":"x"}"#)))).collect();
-    assert_eq!(tags, [r#"{"by":"tag 1"}"#, r#"{"by":"tag 2"}"#, r#"{"by":"tag 2"}"#]);
+    let tags: Vec<String> = (0..2).map(|_| body(&found(answer(&s, &mut t, "POST", "/search", "", br#"{"tag":"x"}"#)))).collect();
+    assert_eq!(tags, [r#"{"by":"tag 1"}"#, r#"{"by":"tag 2"}"#]);
+    assert_eq!(missing(answer(&s, &mut t, "POST", "/search", "", br#"{"tag":"x"}"#)).reason, NoMatchReason::WriteNotRecorded);
 }
 
 #[test]

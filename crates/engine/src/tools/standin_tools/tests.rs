@@ -154,6 +154,13 @@ fn a_write_moves_later_reads_on_over_loopback() {
         assert!(post.starts_with("HTTP/1.1 201") && post.contains(r#"{"id":1}"#), "{post}");
         assert!(get(&url, "/todos").contains(r#"{"todos":[1]}"#), "the read recorded after the write");
         assert_eq!(call(&e, "web_standin_show", json!({})).unwrap()["result"]["servers"][0]["recording_position"], 1);
+        // A second add was never recorded: it's refused, says so, and is counted.
+        let again = http(&url, "POST /todos HTTP/1.1\r\nHost: {HOST}\r\nContent-Length: 2\r\n\r\n{}");
+        assert!(again.starts_with("HTTP/1.1 404") && again.contains("write_not_recorded") && again.contains("No write like this was recorded"), "{again}");
+        assert!(get(&url, "/todos").contains(r#"{"todos":[1]}"#), "a refused write changes nothing");
+        let shown = call(&e, "web_standin_show", json!({})).unwrap();
+        assert_eq!(shown["result"]["servers"][0]["writes_refused"], 1, "{shown}");
+        assert_eq!(shown["result"]["servers"][0]["requests_with_no_answer"], 1, "{shown}");
 
         // Started again, it goes back to the beginning.
         call(&e, "web_standin_stop", json!({})).unwrap();

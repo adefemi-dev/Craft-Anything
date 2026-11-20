@@ -2120,12 +2120,12 @@ Owner: open · Status: in progress
       sent by POST counts as a read, and a version-1 file replays as before
       — claimed: mansur-akhmadi, branch feature/r3.11-standin-writes-change-reads
 - [ ] Stand-in backend: a write steps to the next recorded write of its kind whatever it sends (another
-      id or text gets the recorded answer), one with no recorded match changes nothing; reads follow
+      id or text gets the recorded answer), one past them or with no recorded match is refused and changes nothing; reads follow
       only the recorded timeline, every write is kept and counts toward a route's answers, a write reaches only reads of related paths (a sign-in
       changing `/me` isn't seen), a running stand-in keeps one place for all clients, and
       a route keeps its first 16 answers, so the later states of a long recording are left out; a
       GraphQL operation named past the first 64 its document defines counts as a write (the reader
-      keeps no more), and one whose recorded name was hidden steps nothing
+      keeps no more), and one whose recorded name was hidden is refused
 - [x] Tell the builder about the stand-in backend in a website's brief, when the capture kept a
       recording (`capture/*.har`): what `web_standin_build`, `web_standin_start` and the rest do
       (`brief::standin_words`); Deep mode only, since Clean room reads nothing inside the original

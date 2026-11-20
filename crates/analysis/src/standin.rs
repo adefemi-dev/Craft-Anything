@@ -13,7 +13,8 @@
 //! write a client replays moves later reads of its path (and of paths above or under it) on to the
 //! answers recorded after that write, so a list read after a recorded "add" shows what the
 //! original showed then. Nothing is computed from what the client sends: a write steps to the next
-//! recorded write of its kind whatever it carries, and one with no recorded match changes nothing.
+//! recorded write of its kind whatever it carries, and one the recording has no answer of its own
+//! for (past the recorded ones of its kind) is refused and changes nothing.
 
 use crate::web_har::{CREDENTIAL_HEADERS, Redactor, contains_ascii_ci, decode_query_name, is_credential_param, is_uuid, replace_needles_with, split_url};
 use craft_anything_formats::har::{self, Har, HarEntry, HarError};
@@ -1175,6 +1176,9 @@ pub enum NoMatchReason {
     OperationNotRecorded,
     /// The matching responses need a cached body that is unavailable in the recording.
     CachedBodyUnavailable,
+    /// A write the recording has no answer of its own for: past the recorded writes of its kind,
+    /// or a named operation where only another one's (its name hidden) was recorded.
+    WriteNotRecorded,
 }
 
 /// A route close to what was asked for.
@@ -1253,26 +1257,35 @@ fn after(order: u64, place: Option<u64>) -> bool {
 
 /// Narrow the fitting answers of route `ri` to the ones that apply at this client's place in the
 /// recording, and say whether they're writes to step through. A write request takes the first
-/// recorded write after the last one replayed of that write's own kind, or the last there is; a
-/// named GraphQL operation none of them recorded steps nothing. Otherwise the
+/// recorded write after the last one replayed of that write's own kind; past them, or for a named
+/// GraphQL operation none of them recorded, there's none (`None`): a stand-in never answers a write
+/// nobody recorded as if it worked. Otherwise the
 /// recorded reads apply: those between the last accepted write replayed on a related path and the
 /// next related one recorded, or else the earliest from after that place (which shows the client's
 /// own write), or else the newest from before it.
 /// When any answer has no place (a file from before version 2), all of them apply, as they did.
-fn on_timeline(standin: &StandIn, ri: usize, route: &StandInRoute, fit: Vec<usize>, turns: &Turns, write: bool, key: Option<&str>) -> (Vec<usize>, bool) {
+fn on_timeline(
+    standin: &StandIn,
+    ri: usize,
+    route: &StandInRoute,
+    fit: Vec<usize>,
+    turns: &Turns,
+    write: bool,
+    key: Option<&str>,
+) -> Option<(Vec<usize>, bool)> {
     let placed: Option<Vec<(usize, u64, bool)>> = fit.iter().map(|i| route.samples.get(*i).and_then(|s| Some((*i, s.order?, s.write)))).collect();
-    let Some(placed) = placed.filter(|p| !p.is_empty()) else { return (fit, false) };
+    let Some(placed) = placed.filter(|p| !p.is_empty()) else { return Some((fit, false)) };
     let first_by = |pool: &[(usize, u64, bool)], keep: &dyn Fn(u64) -> bool| pool.iter().filter(|x| keep(x.1)).min_by_key(|x| x.1).map(|x| x.0);
     let last_by = |pool: &[(usize, u64, bool)], keep: &dyn Fn(u64) -> bool| pool.iter().filter(|x| keep(x.1)).max_by_key(|x| x.1).map(|x| x.0);
     let (writes, reads): (Vec<_>, Vec<_>) = placed.iter().partition(|x| x.2);
     if write && !writes.is_empty() {
         let kind = |x: &(usize, u64, bool)| route.samples.get(x.0).and_then(|s| s.request_key.clone());
-        // Another operation's answer (its name hidden from the file, say) isn't this one's step.
+        // Another operation's answer (its name hidden from the file, say) isn't this one's.
         if key.is_some_and(|k| k.starts_with("op:")) && !writes.iter().any(|x| kind(x).as_deref() == key) {
-            return (writes.iter().map(|x| x.0).collect(), false);
+            return None;
         }
         let next = writes.iter().filter(|x| after(x.1, turns.written.get(&(ri, kind(x))).copied())).min_by_key(|x| x.1).map(|x| x.0);
-        return (next.or_else(|| last_by(&writes, &|_| true)).into_iter().collect(), true);
+        return next.map(|i| (vec![i], true));
     }
     // A request named only by its operation can't be told from a write, but the recording can.
     let pool = if reads.is_empty() { placed } else { reads };
@@ -1283,10 +1296,10 @@ fn on_timeline(standin: &StandIn, ri: usize, route: &StandInRoute, fit: Vec<usiz
     let mut now: Vec<(usize, u64, bool)> = pool.iter().copied().filter(|x| after(x.1, clock) && before_next(x.1)).collect();
     if now.is_empty() {
         let fallback = first_by(&pool, &|o| after(o, clock)).or_else(|| last_by(&pool, &|o| !after(o, clock)));
-        return (fallback.into_iter().collect(), false);
+        return Some((fallback.into_iter().collect(), false));
     }
     now.sort_by_key(|x| x.1);
-    (now.into_iter().map(|x| x.0).collect(), false)
+    Some((now.into_iter().map(|x| x.0).collect(), false))
 }
 
 fn template_fits(template: &str, path: &str) -> bool {
@@ -1419,7 +1432,9 @@ pub fn answer(standin: &StandIn, turns: &mut Turns, method: &str, path: &str, qu
     // On a timeline a lone answer takes no turn, so a set that starts with it later starts at the
     // beginning; without positions every answer takes one, as before positions were recorded.
     let timed = fit.iter().all(|i| route.samples.get(*i).is_some_and(|s| s.order.is_some()));
-    let (fit, stepping) = on_timeline(standin, ri, route, fit, turns, write, key);
+    let Some((fit, stepping)) = on_timeline(standin, ri, route, fit, turns, write, key) else {
+        return Answer::NoMatch(NoMatch { reason: NoMatchReason::WriteNotRecorded, nearest: Vec::new() });
+    };
     let at = match fit.first() {
         Some(first) if fit.len() > 1 || !timed => {
             let counter = turns.turns.entry((ri, *first, how)).or_insert(0);

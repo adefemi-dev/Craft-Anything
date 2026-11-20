@@ -1535,6 +1535,13 @@ Owner: open · Status: in progress
 - [ ] Hold the self-test to what the check can see too: picture the game after its scripted
       input and require it to differ from the `--screenshot` picture (a report alone is the
       build's own word)
+- [ ] An accessibility floor the person can turn on: unnamed controls, pictures with no `alt`
+      attribute (an empty `alt` marks a decorative picture and passes) and a missing page
+      language judged on the build alone. `health_notes` (`kinds/website.rs`)
+      flags them only where the build is worse ("Problems the original has too aren't the
+      build's to fix."). The `a11y` block survives Clean room (`visitor_view` keeps it).
+      Passing it is a floor, not an accessibility audit. Test on a page where the original
+      and the build share a barrier
 
 ### R2.7 The request decides how to build
 Owner: open · Status: in progress
@@ -1602,6 +1609,10 @@ Owner: open · Status: in progress
 - [x] System-tool and media-player phrases keep the app target: "a low level disk tool",
       "an MPEG 2 player" and "a single player app for movies". Independent game cues still apply
       — claimed: Afloat16, branch bugfix/r2.7-media-and-system-apps
+- [ ] When the request names a language, check the page's declared language rather than the
+      original's words: the check lists missing words and the refine message tells the builder
+      to add them (`kinds/website.rs`), so a translated rebuild is told to put them back. A
+      matching declared language doesn't show the words were translated
 
 ### R2.8 Clean room means clean room
 Owner: maintainers · Status: in progress

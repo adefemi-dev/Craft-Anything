@@ -1727,10 +1727,17 @@ Gaps found while using the app for real projects.
       regression in `session.rs` covers the switch, the same-project refresh and returning to the
       first project
       — claimed: AlexJoaquimPereira, branch bugfix/r2.9-project-evidence-switch
-- [ ] A project opened after another keeps the session's open targets and their annotations: a
-      report for the new project can name the old project's target, and annotations saved after
-      the switch go to the new project's store. Decide whether opening a project closes the
-      targets or reloads their annotations from the new one
+- [x] A project opened after another kept the session's open targets and their annotations: a
+      report for the new project could name the old project's target, and annotations saved after
+      the switch went to the new project's store. Opening a different project now closes the
+      previous project's open targets and clears the active one, so a report can't name them and
+      no annotation reaches the new store; reopening the same project keeps its targets. The
+      regression in `session.rs` covers the switch, the target it closes and the annotation it
+      keeps apart, the same-project reopen and returning to the first project
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.9-project-switch-targets
+- [ ] A target opened before any project keeps its empty annotations when the first project opens,
+      so a later edit can overwrite that project's stored annotations for the same target: load
+      them when the first project opens (a switch closes its targets instead)
 - [x] A Clean room build or question must also not resume an API backend's kept transcript:
       `ws.transcript_path()` is loaded whenever it exists, so switching modes can carry what a Deep
       API build read. Clear it, or record its mode, when the mode changes; add a regression

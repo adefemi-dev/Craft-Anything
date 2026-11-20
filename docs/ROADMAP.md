@@ -169,6 +169,12 @@ cheapest help we can give anyone, so nothing below should hold it up for long.
 
 ### R5.2 Keeping contributions moving
 Owner: maintainers · Status: in progress
+- [x] Keep development builds from filling the disk with debug information (#1584): the dev
+      profile keeps line tables for our crates and none for dependencies. A fresh build of the CLI
+      and the `smoke` UI test on Windows (MSVC) went from 5.8 GB to 2.9 GB and 300 s to 205 s
+      — claimed: justinjohn0306, branch `chore/r5.2-dev-debug-info`
+- [ ] Measure #1584's dev profile on Linux, macOS and a GNU Windows host, where debug information
+      is stored differently
 - [x] Fix PR #1030's Windows descendant fixture startup and stop the watched launch before
       startup assertions can fail; cover the failure cleanup path
       — claimed: Codex, branch bugfix/r5.2-watched-launch-tests
@@ -237,6 +243,11 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       with the fixture's canonical path, so macOS's `/var` → `/private/var` alias does not fail
       the test. Remote expansion and special-character quoting checks are retained — PR #949
       — claimed: Codex, branch test/r5.2-macos-remote-query-path
+- [x] `claude_codes_account_folder_is_set_in_settings` (ui-egui smoke) failed about one CI run in
+      ten: every job that changes an AI hands back a snapshot of the backends, and one read before
+      a save could be shown after it, putting the old folder back (in the app too, until the next
+      refresh). Snapshots are numbered as they're read and an older one is dropped
+      — claimed: bflatastic, branch bugfix/r5.2-stale-backend-snapshots
 - [x] `which::tests::usual_windows_dirs_come_after_path` (platform) failed on Windows with 10
       found, 9 expected ("nothing twice"): #748's second Antigravity folder, counted since #770
 - [x] `capture::console_tests` (platform) timed out now and then with the whole platform suite
@@ -322,6 +333,12 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       `self_cli_path` no longer found the CLI and the two rebuild tests that start it failed on
       `main` and every pull request. It now finds the CLI from that folder too
       — claimed: bflatastic, branch bugfix/r5.2-cli-in-new-build-dir
+- [x] `cargo fmt --all` (and so `cargo xtask ci`) fails on Windows with "The filename or extension
+      is too long" (os error 206): it hands rustfmt every target's root file in one command, about
+      31,000 characters of `\\?\` paths, past Windows' 32,767 limit, and one crate (formats, ~22,000)
+      will reach it alone. Format through `cargo xtask fmt [--check]`, which runs rustfmt on the same
+      files in batches that fit, and have `ci` use it
+      — claimed: FuryNocturn, branch chore/r5.2-fmt-on-windows
 
 ### R5.3 A builder that can't make progress stops
 Owner: open · Status: todo
@@ -357,8 +374,21 @@ Every round spends the person's money or quota. One that can't do anything shoul
 - [x] A builder step on an API backend stops after 25 failed build commands in a row (none
       succeeding between), says so and keeps the project (`MAX_FAILED_BUILDS` in `agent.rs`, #399:
       9.4M tokens in 19 minutes of the first stage, never compiled). Try again carries on
+- [ ] An unreadable `usage.json` reads as all zeros (`ProjectUsage::load` in `workspace.rs`), so
+      the cost shown can be $0 for a build that spent money. Say the count is unknown instead, as
+      R2.2's ACP line asks for agents' turns
+- [ ] Show what the last run used next to Try again. `usage.json` keeps project totals only
+      (time, tokens, `cost_usd`, `api_billed_usd`); the activity log has each turn's tokens but
+      no cost, since a resumed agent's figure can't be tied to one turn (`activity.rs`). Show
+      the run's tokens, and a cost only where it can be attributed
 - [ ] **decision** Whether a build gets a token or cost limit of its own, beyond rounds and that
-      stop (#399): a model that changes code without ever running a build isn't caught by it
+      stop (#399): a model that changes code without ever running a build isn't caught by it.
+      One shape: price each builder turn before it runs, as asset calls already are
+      (`AssetProvider::estimate` against the project's asset budget, $5 by default), and stop at
+      a limit the person sets. That price is an estimate, so a limit that holds reserves each
+      turn's input and output allowance, counts calls in flight, in parallel and retried, and
+      settles against what the turn used; a turn whose use isn't known doesn't count as money
+      left. #503's spending controls wait on R5.2's wide-PR decision too
 - [ ] Check live that the stop fires on a real API-backend build and the message reads well. It
       fired on a local Ollama build (the same built-in loop) after two turns that changed nothing
       in `app/` ("The build stopped after two builder turns changed no files in app/…"); an
@@ -550,8 +580,9 @@ been run live.
       Not run against a live provider — claimed: justinjohn0306, branch `feature/r5.4-requests-per-minute`
 - [x] Offer `requests_per_minute` in Settings → AI and `ai request-rate` (#668)
       — PR #1841; claimed: rudycelekli, branch feature/r5.4-request-rate-setting
-- [ ] Say in the feed when a build is waiting for its turn (#668); a tokens-per-minute limit
-      isn't covered either
+- [x] Say in the feed when a build is waiting for its turn (#668)
+      — claimed: justinjohn0306, branch feature/r5.4-say-when-a-request-waits
+- [ ] A tokens-per-minute limit isn't covered by the request pacing (#668)
 - [x] Find LM Studio on another port (#73): the port in its settings file (when it is there) and
       the ports 1235-1239 are probed like the usual servers; OpenCode's own `baseURL`s were already
       read (#83)
@@ -617,13 +648,26 @@ Owner: open · Status: todo
       saved builder that is off or gone and the AI building instead: the CLI prints it before the
       run, `rebuild_start` adds `builder_notice`, and an answered question carries it
       — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-headless-builder-notice`
-- [ ] The saved-builder replacement notice is English only for now; add it to the catalogs after a
-      native speaker checks the wording
+- [x] Add the saved-builder replacement notice on Make and at build starts to the UI catalogs;
+      Turkish wording reviewed and approved by native speaker @MacallanTheRoot, English unchanged
+      — claimed: MacallanTheRoot, branch fix/r5.5-localize-builder-replacement-notice
+- [ ] Native-speaker reviews of the saved-builder replacement notice in the other UI languages;
+      their catalog entries retain the existing English wording until reviewed
+- [x] Localize the replacement notice shown after Just ask using typed replacement names from the
+      answer (`builder_replacement.saved` and `.used`); `builder_notice` keeps its English wording
+      for headless callers. The UI reuses the existing catalog template and preserves literal names.
+      — claimed: MacallanTheRoot, branch bugfix/r5.5-just-ask-builder-notice — PR #2142
 - [x] Bound accumulated data across all lines of one server-sent event, so short lines cannot
       grow a streamed API response without limit
       — claimed: Afloat16, branch bugfix/r5.5-bounded-sse-events-20261103
 - [x] Show the provider's own reason: #369 bought $10 of credit and got only "OpenRouter answered
       400: Provider returned error". Find the reason in the response body and show it — PR #542
+- [x] A Claude build failed with 400 "Invalid `signature` in `thinking` block" once the conversation
+      was summarised, and every retry failed the same way (#1585): summarising, trimming or a
+      resumed build's new system prompt changes what Claude's signed thinking blocks were written
+      after. Requests now send `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`
+      (beta `thinking-binding-controls-2026-08-01`), so those blocks are dropped instead
+- [ ] Check #1585 live: a long Claude build that summarises, then a resumed one, carry on
 - [x] OpenRouter picks an upstream provider per request, and one without tool calling answered
       "400: Provider returned error" (#369): a request with tools now sets
       `provider.require_parameters`, and a 404 "no provider for these parameters" falls back to the
@@ -632,6 +676,9 @@ Owner: open · Status: todo
       is sent, so a key with $35 left of a daily limit got 402 "You requested up to 131072 tokens, but
       can only afford 35063" (#1213): ask again once with the answer capped at what it can afford
       — claimed: justinjohn0306, branch bugfix/r5.5-openrouter-afford-tokens
+- [x] A key from the model's maker pasted for OpenRouter (Kimi's own, for Kimi K3.1 Pro) got only
+      "OpenRouter answered 401: Missing Authentication header" (#1506): OpenRouter's 401 now says
+      it takes its own key (`sk-or-…`), and Detect's hint says so before it's pasted
 - [x] A saved fal.ai key reaches an API-key build's asset tools; every call said "No fal.ai key"
       (#923). Outside a project the tools now say that instead. Not checked with a real fal.ai key
       or API build
@@ -752,6 +799,10 @@ yet, and the quick start is how every new person begins.
 - [x] Find what every name reaches in one walk instead of one `find_result_key` from the root
       per array name, so `result_lists` stays linear in the result's size (#2107 follow-up)
       — claimed: Plastic-time, branch bugfix/r5.7-result-lists-first-match-map
+- [x] Stop `result_lists` before indexing nested names when 64 root arrays fill the summary (#2116 follow-up).
+      — claimed: Plastic-time, branch bugfix/r5.7-result-lists-cap-before-index
+- [x] Check that the nested lookup tables are built at 63 root arrays and skipped at 64 (#2125 follow-up).
+      — claimed: Plastic-time, branch test/r5.7-list-lookup-cap
 - [x] `app_builds_line_up` paired 1,448 of ~36,000 functions across two Rust toolchains: every
       v0 crate hash (`Cs<hash>_`) changed, so exact names rarely match, and some masked-bytes
       pairs are unrelated functions (`hex_encode` → `_git_oid_tostr`). Compare Rust names with
@@ -814,12 +865,16 @@ yet, and the quick start is how every new person begins.
       Ghidra's setup's Java and `engines_install jadx`: Java source of a class came back (before:
       JADX exited 1)
       — claimed: Fadlalla-ai, branch bugfix/r5.7-jadx-uses-managed-java
-- [x] A Ghidra folder setting that names a file, such as the `/usr/bin/ghidra` start script, is listed as
+- [x] A Ghidra folder setting that names a file, such as a `/usr/bin/ghidra` start script, is listed as
       found by `engines_list`, but Deep mode then quietly decompiles with the built-in lifter instead;
       refuse it, or follow the script to its Ghidra folder. A file is now run only when it is the
-      headless launcher or a script that runs it; a link or start script is followed to its Ghidra
-      folder; anything else isn't listed as found. Live in Debian 13 with Ghidra 12.1.4 laid out as
-      Arch-based packages do: `/usr/bin/ghidra` and a linked `ghidraRun` now decompile with Ghidra
+      headless launcher or a short text file that names it (whether it runs it isn't checked); any
+      other file in a Ghidra folder, or in a folder directly inside one, gives that folder's
+      launcher, links followed (the file itself isn't checked); a start script elsewhere is followed
+      to the Ghidra folder it names; anything else isn't listed as found.
+      Live in Debian 13 with Ghidra 12.1.4, a `/usr/bin/ghidra` start script we wrote and a linked
+      `ghidraRun`: both now decompile with Ghidra. Arch's own package (12.2) links `/usr/bin/ghidra`
+      to `ghidraRun` instead; tried later, it is found with each setting (#85)
       — claimed: Fadlalla-ai, branch bugfix/r5.7-ghidra-setting-names-a-file
 - [x] Two cases left by the line above (review of #1949): a wrapper script in Ghidra's own folder
       that runs the launcher was passed over for that folder's launcher, and a start script naming a
@@ -856,8 +911,16 @@ yet, and the quick start is how every new person begins.
       build's run and screenshot checks): `launch_now` runs `cargo metadata` and looks in its
       `target_directory` first, which covers `$CARGO_HOME/config.toml`, `CARGO_BUILD_TARGET_DIR`
       and a parent workspace's `target/`; the Project screen keeps the file lookup. Checked on a
-      workspace member and a `CARGO_BUILD_TARGET_DIR` build that the file lookup doesn't find
+      workspace member and a `CARGO_BUILD_TARGET_DIR` build that the file lookup doesn't find (it
+      does since the line below)
       — claimed: Fadlalla-ai, branch fix/cargo-target-dir-at-start
+- [x] The file lookup (the Project screen's Play and "Pin this build", a saved Live pin) misses a
+      build only Cargo places: a workspace member's, `CARGO_BUILD_TARGET_DIR`, and
+      `build.target-dir` in Cargo's home config. Read those from the files and the
+      environment too, starting no process; a folder outside the app still gives only a program
+      whose record names the app's sources. Done, with Cargo's rules it doesn't follow listed in
+      STATUS
+      — claimed: Fadlalla-ai, branch bugfix/play-finds-cargo-placed-builds
 - [x] With `CARGO_TARGET_DIR` set (a build folder shared by several projects), a program of the
       same name built by another project there is taken for the project's own: Play and a new pin
       can start or copy it, and a pin made before programs were recorded looks outside its copy.
@@ -937,6 +1000,12 @@ Owner: open · Status: in progress
       it carried on, with a core and gigabytes of memory, until the app closed. Pausing still
       leaves it running, so a paused build loses nothing
       — claimed: justinjohn0306, branch `bugfix/r1.5-stop-analysis-for-deleted-project`
+- [x] Validate MCP HTTP plugin URLs against parsed `http::Uri` authorities and shared loopback
+      checks (`host_is_loopback`), trim stored `ServerUrl` whitespace, refuse HTTPS-to-HTTP
+      downgrade redirects, and follow loopback HTTP `307`/`308` redirects by hand only while they
+      stay on this computer (`crates/engines/src/mcp_client.rs`).
+      Unit-tested with local HTTP and TLS servers.
+      — claimed: Plastic-time, branch bugfix/r1.5-mcp-http-cleartext-guard
 - [ ] More pins once their hashes are checked against the publisher: Chromium (no published
       checksums found yet), Rizin for Linux (the tar.xz unpacks to ~800 MB, so it needs streaming
       extraction) and macOS (a .pkg)
@@ -1036,6 +1105,9 @@ Owner: open · Status: in progress
       document functions touched by the OpenCode model-selection changes.
 - [x] Integrate the five-level `Effort` type from #395 for agent variants, and share a strict
       disk-based selection save between the hub and headless tools, preserving unrelated edits.
+- [x] Settings → AI offers no model choice for Codex, so its model can only be set by editing
+      config.toml (#2109): offer Codex's own listed models (`codex debug models`) and its default
+      — claimed: justinjohn0306, branch bugfix/r2.2-codex-model-picker
 - [x] Rebase onto main after #395's squash merge, preserve extra model arguments without a saved
       selection, and render the remote-host placeholder visibly in the setup instructions.
 - [x] Hold the UI settings worker's session guard through its disk save so it cannot overwrite
@@ -1180,6 +1252,10 @@ Owner: open · Status: in progress
       the dotted-table form failed with "cannot extend value of type inline table with a dotted
       key" (#1867). A config-shape regression keeps the hint and the generated table valid.
       — claimed: AlexJoaquimPereira, branch bugfix/r2.2-codex-approval-hint
+- [x] Codex (#1464): `assets_image_generate` and `assets_model_generate` were refused by `codex
+      exec`'s approval policy, so a Codex builder couldn't make paid assets. Approve them on Codex's
+      side too: the project's generated-assets switch and budget (with its question) still limit them
+      — claimed: justinjohn0306, branch bugfix/r2.2-codex-approve-asset-tools
 - [x] Codex: resume support (`codex exec resume <id>`), verified on a real install
       — claimed: Codex, branch feature/r2.2-codex-resume (local workspace)
       — verified on macOS with Codex 0.169.0-alpha.11.1: MCP call, sandboxed file write,
@@ -1220,7 +1296,12 @@ Owner: open · Status: in progress
       path, not `-z`'s one-shot run, so check what it prints and approves before moving to it.
       For the others, find in their source whether they read a message from stdin or a file
 - [ ] A note sent during a build reaches the builder at its next step on other coding agents with
-      tool hooks, and on the API-backend loop between tool calls (Claude Code only today)
+      tool hooks (Claude Code only today)
+- [x] A note sent during a build reaches an API-backend builder between tool calls, not only after
+      its turn: after each tool step the loop claims the waiting notes and adds them after the
+      results (`LoopConfig::notes`, the hook's own wording), and the build relays them to the feed
+      as read (`a_note_reaches_an_api_builder_between_tool_calls`)
+      — claimed: justinjohn0306, branch feature/r2.2-notes-between-api-tool-calls
 - [ ] Session copies for other agents that keep sessions (ACP agents' `session/load`) (#451)
 - [x] Hermes Agent's native Windows install (`%LOCALAPPDATA%\hermes\bin`) is searched, so an app
       started before the install, or by a launcher, finds it (#116)
@@ -1450,8 +1531,11 @@ Owner: open · Status: in progress
       `--screenshot`, `--self-test` or mechanics sheet. A site stack with nothing to recreate is a
       website, whatever the request says
       — claimed: xerenon, branch feature/r2.7-own-project-checks; PR #760
-- [ ] Run the Go, .NET, Maven and Gradle rows of `[[toolchain]]` on real projects, and every row
-      on Windows (`windows_program`): Rust, Node.js, Python and Make were run for real, on a Mac
+- [x] Run the Go row of `[[toolchain]]` on a real existing project on macOS. The opt-in test
+      covers a passing module, a failed test assertion and a build syntax error (Go 1.26.4, arm64)
+      — PR #1849; claimed: rudycelekli, branch test/r2.7-real-go-project-checks
+- [ ] Run the .NET, Maven and Gradle rows of `[[toolchain]]` on real projects, and every row
+      on Windows (`windows_program`): Rust, Node.js, Python, Go and Make were run for real, on a Mac
       only. Also a person's own Unity project: it's opened in batch mode, which should exit with
       an error when its scripts don't compile (not run: no Unity on that machine)
 - [ ] A person's own tests that already failed before their request fail the check too, so the
@@ -1506,6 +1590,21 @@ Owner: maintainers · Status: in progress
 ### R2.9 Everyday use: typing, projects, settings
 Owner: maintainers · Status: in progress
 Gaps found while using the app for real projects.
+- [x] `i18n::trf` filled placeholders with repeated replacements, so a value containing a later
+      placeholder was rewritten. It now fills them in one pass over the template: inserted names
+      and other values stay literal, and unknown names and stray braces are kept as written. The
+      R5.5 saved-builder notice uses it instead of its own split
+      — claimed: mansur-akhmadi, branch bugfix/r2.9-trf-literal-values
+- [x] The engine build steps (`rebuild::stacks`) filled `{editor}`, `{player}` and `{ext}` with
+      chained `replace` calls, so an editor path holding `{ext}` or `{player}` was rewritten. The
+      one-pass fill now lives in `platform::text::fill` (L2), which both the steps and
+      `i18n::trf` use, so the editor's path reaches the builder as it is
+      — claimed: mansur-akhmadi, branch bugfix/r2.9-stack-steps-literal-values
+- [x] The plugin form split its arguments on spaces, so a JSON array pasted from another client's
+      configuration became arguments with brackets, quotes and commas in them (#2153). A pasted
+      JSON array of strings is now taken as the arguments, which also allows an argument with a
+      space; anything else is split on spaces as before
+      — claimed: bflatastic, branch bugfix/plugin-args-json-array
 - [x] Each project chooses, per kind of action, what the builder's approvals get (allow, ask or
       refuse): reading the web, commands, files outside the project, pushing and publishing,
       deleting outside the project, system changes, other tools. Unset kinds follow Auto mode as
@@ -1562,6 +1661,12 @@ Gaps found while using the app for real projects.
       agent setup: `AiHub::start` checks `enabled` and says how to turn it on or choose another
       — PR #1008; claimed: Codex, branch bugfix/r2.9-disabled-chat-backend
       (the API regression uses invalid tunnel settings to detect setup before the guard)
+- [x] `compare` checks both names before it builds either conversation, so an off or unknown
+      second side cannot leave a half-started comparison; a CLI regression covers `chat --backend`
+      with a turned-off agent
+      — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-chat-turned-off-backend`
+- [ ] The app's chat keeps a turned-off AI as its saved choice and refuses every send; offer to
+      turn it on or choose another enabled AI
 - [x] Ctrl+V (Shift+Insert, Cmd+V) in a prompt box that takes pictures pastes a copied image (saved
       as a PNG) or copied picture files; attachments show as square picture tiles, the whole
       picture on hover, decoded on a worker
@@ -1707,6 +1812,11 @@ Gaps found while using the app for real projects.
       — claimed: Nghiathan13, branch bugfix/r2.9-linux-gpu-choice
 - [ ] Linux GPU choice on a desktop with monitors on two GPUs, and on an Intel + NVIDIA laptop:
       covered by unit tests on fake `/sys/class/drm` folders, not run on such a machine yet (#571)
+- [x] A display wider than 8192 px no longer aborts the app at startup: egui-wgpu asked every GPU
+      for 8192 px textures at most, so the window's surface couldn't be configured on a 5120-point
+      display at 2x (#1639). The app now asks the GPU for its own limit, never less than before
+      — claimed: bflatastic, branch bugfix/r2.9-gpu-texture-limit
+- [ ] Check #1639 live on a Mac with a display wider than 8192 px (built and checked by CI only)
 - [x] "Work on my project" on New project, beside "Make my own version" and "Just look inside":
       pick the folder of a project you already have, say what to change, and its files are edited
       in place, with nothing asked; the project takes the folder's name, an empty folder is
@@ -1724,6 +1834,12 @@ Gaps found while using the app for real projects.
       with a plain error, while files at or under the cap page as before. The regression covers
       the cap and the boundary
       — claimed: AlexJoaquimPereira, branch bugfix/r2.9-build-file-read-cap
+- [x] A Claude Code conversation that had grown too long stopped every later turn with "Prompt is
+      too long", and Try again resumed the same conversation (#2042). That refusal is now treated
+      like a saved conversation that isn't on this computer: the next message starts a new one from
+      what the project already has. Checked by a parser test on the result line; the exact line
+      Claude Code prints wasn't captured from a live run
+      — claimed: bflatastic, branch bugfix/claude-session-too-long
 - [x] `build_file_edit` read the whole project file into memory before replacing text; it now
       uses the same 16 MiB cap as a read, refusing a larger file before it is loaded and leaving
       it unchanged. A file at the cap still edits when the result fits the 8 MB write cap. Engine
@@ -2043,8 +2159,13 @@ Owner: open · Status: in progress
       folder or archive no longer shown is ignored, including its error; UI regressions cover both
       scopes and an ignored error
       — claimed: AlexJoaquimPereira, branch bugfix/r3.9-game-files-stale-results
-- [ ] Pick game A, B, then A again while the first A look is still running: the older A result can
-      still land after the newer one. Correlate each look with a request id, not only the path
+- [x] Pick game A, B, then A again while the first A look is still running: the older A result can
+      still land after the newer one. Done: each look and listing carries the job that asked for
+      it, and only the jobs the screen still waits for are applied, so a repeated pick ignores the
+      older answer; a folder whose name isn't text is refused with a message before a look starts.
+      UI regressions cover the same-folder re-pick through the app's dispatch, the refusal, and a
+      failed or superseded worker settling only its own spinner
+      — claimed: AlexJoaquimPereira, branch bugfix/r3.9-game-files-request-ids
 - [x] Decode Unreal packed 10-bit normalized and 11-bit floating-point textures through the bounded picture exporter.
       — claimed: Afloat16, branch feature/r3.9-unreal-packed-textures-20261111
 - [x] Unreal: decode cooked half- and full-precision floating-point textures with the shared bounded pixel reader.
@@ -2134,8 +2255,12 @@ Owner: open · Status: in progress
       — claimed: Plastic-time, branch bugfix/r3.11-pseudo-indirect-call-target
 - [x] Pass an argument register used as a memory-indirect call's base as the call's argument, keep the static address of A32 PC-relative stores, and give import tail calls through `ldr pc`/`jmp [slot]` their register arguments and a `Pseudo.calls` entry.
       — claimed: Plastic-time, branch bugfix/r3.11-pseudo-call-args
-- [x] Keep a memory-indirect call's base argument after an earlier read of it, keep argument loads before stores that may overwrite what they read, stop recording a store's source register as an assignment in pseudo-C, and record A32 `STRB`/`STRH`/`STRD` source registers as read (#2114 follow-up).
+- [x] Keep a memory-indirect call's base argument after an earlier read of it, keep argument loads before stores that may overwrite what they read, stop recording a store's source register as an assignment in pseudo-C, and record A32 `STRB`/`STRH`/`STRD` source registers as read (#2114 follow-up, #2119).
       — claimed: Plastic-time, branch bugfix/r3.11-pseudo-call-arg-followups
+- [x] In pseudo-C, keep argument loads before writes that may change them when the width is unknown, the frame slot is indexed, the segments differ, the instruction is not modelled or the load reads a literal, and stop a Win64 outgoing stack argument folding after a write to its slot (#2119 follow-up).
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-memory-write-overlap
+- [x] Preserve argument loads across implicit and multi-register writes, and limit fixed-width Win64 slot invalidation to overlapping offsets (#2124 follow-up).
+      — claimed: Plastic-time, branch bugfix/r3.11-pseudo-write-footprints
 - [ ] `native_source_folder_write` uses the built-in decompiler only: use Ghidra in Deep mode when
       it's there
 - [x] Keep source registers alive when an AArch64 arithmetic result is discarded into the zero register.
@@ -2238,9 +2363,38 @@ Owner: open · Status: in progress
       a count and the first reason (`.` for the root). The notes that named only the file-count or
       depth limit name every limit. An entry that is there but can't be looked at was run with a
       made-up name only, not with a real permission failure
-- [ ] Five calls of `walk_dir` (`apple_tools` twice, `application_tools`, `managed_tools`,
-      `web_tools`) read only `truncated`, so a folder with unreadable entries reads there as "cut
-      short" without naming the folder or the reason: pass `unlisted` on as `core_archive_show` does
+- [x] Five calls of `walk_dir` (`apple_tools` twice, `application_tools`, `managed_tools`,
+      `web_tools`) read only `truncated`, so a folder with unreadable entries read there as "cut
+      short" without naming the folder or the reason. `app_source_import`, `js_source_bundle_compare`
+      (a source folder given as a path), `apple_nib_decode`, `apple_dylibs_resolve`,
+      `managed_reconstruction_check` and `js_sources_restore` now carry an `unlisted_folders`
+      limitation (or note) naming the first five such folders with the system's reason, and how many
+      more there are (it isn't a full list), and partial coverage; a folder below the root that can't
+      be listed at all marks the walk as cut short too. When nothing is found to work on (no `.cs`
+      files, no scripts), the error names the folders that couldn't be listed and says to make them
+      readable; inputs with the same folder name are told apart (`dist (input 2)`), and
+      `apple_dylibs_resolve` is partial whenever its walk was cut. Tested on Windows with a folder
+      held without sharing; the Unix path (no permission) runs in CI
+- [x] `managed_reconstruction_check` stops reading `.cs` files at its file or size budget and says so
+      in a note, but its coverage stays complete, so members declared only in an unread file read as
+      missing in a complete check (CodeRabbit on #2106): carry the cut into coverage, apart from the
+      unlisted-folder limitation. Coverage is now partial (no total) when the file or size budget
+      stops the reading, a `.cs` file can't be read, or the folder walk was cut short (a depth or
+      entry limit), as it already was for unlisted folders. The budget, size, depth and unreadable-file
+      cases are tested (the unreadable file through `walk_testing::close`, now also for a file; run
+      on macOS only, the Windows path is untried)
+      — claimed: mansur-akhmadi, branch bugfix/r3.11-reconstruction-check-cut-coverage
+- [x] `managed_reconstruction_check` caps actual source reads with the regular-file reader: a
+      single file gets 64 MiB, and each directory file gets only the remaining aggregate budget,
+      even if it grows after inventory or during the read. A size refusal stops reading and keeps
+      coverage partial. When no source is readable, the error carries the first five source-read
+      notes, a count of further notes, the walk cut and the existing unlisted-folder details.
+      Regression tests grow or remove real files after inventory and cover exact-limit/empty
+      files, oversized single files and bounded error details. Valid source handling is unchanged.
+      — claimed: MacallanTheRoot, branch bugfix/r3.11-bounded-managed-sources — PR #2144
+- [ ] `js_sources_restore` keeps every unlisted folder of every input in memory to name five of them:
+      keep the count and the first five (CodeRabbit on #2106)
+      — claimed: hichang4u, branch bugfix/r3.11-walk-gaps-named
       — claimed: hichang4u, branch bugfix/r3.11-walk-entry-reads
 - [x] `core_archives_compare` reports `rows_capped` and a partial-coverage limitation when the
       added, removed, changed or moved lists are cut at `max_rows`, while its counts stay complete.
@@ -2250,6 +2404,24 @@ Owner: open · Status: in progress
       subfolders read "0 files in 100 entries". Folders, links and files are now one list in path
       order before the cut, and no file after the cut is read
       — claimed: hichang4u, branch bugfix/r3.11-inventory-path-order
+- [x] That path order was only the order of what the walk kept: the walk listed a folder's files
+      before opening its subfolders, so when the file limit stopped it, a file inside an earlier
+      folder (`a/first.txt`) was dropped while later root files (`z1.txt`…) were kept, and sorting
+      couldn't bring it back (CodeRabbit on #2072). The walk now opens a folder where its name sorts
+      in its parent, so a limit that stops the walk (files, entries, path bytes) cuts the tree where
+      a listing of it would end, and results are sorted folder by folder (`path_order`: everything in
+      `a` before `a-b.txt`). Only the listings of the folders on the current path are held, within
+      the same entry limit. Two limits leave a gap rather than an end: a folder past `max_depth` is
+      skipped (the walk is marked cut short) and later entries are still listed; and where a
+      folder's own listing is cut by the entry or path-byte limit, the names kept are the ones the
+      system returned first, which only NTFS returns in name order
+      — claimed: hichang4u, branch bugfix/r3.11-walk-path-order
+- [x] Folder walks report names that cannot be represented as UTF-8 as unreadable entries
+      in their parent, instead of replacing bytes and merging distinct file identities. Valid
+      names, including the replacement character itself, keep their exact spelling and order;
+      skipped names count against the walk's entry and consecutive-failure limits. Inventories
+      retain readable siblings and disclose partial coverage (CodeRabbit on #2101).
+      — claimed: Afloat16, branch bugfix/r3.11-unreadable-entry-names-20261119
 
 ### R3.12 Format parser correctness
 Owner: open · Status: in progress
@@ -2295,8 +2467,10 @@ Owner: open · Status: in progress
       references, keep local references whose query holds a URL, and stop turning unresolved
       HTML script/preload paths into `external:*` packages.
       — claimed: Plastic-time, branch bugfix/r3.12-js-app-tail-order-and-html-refs
-- [x] Treat any URL scheme of two or more characters (`data:`, `blob:`; one letter before `:` is read as a Windows drive) in `js_app` HTML refs and remote window loads as external, read HTML `src`/`href` without surrounding spaces, normalise exact tails before lookup, keep files in a `node_modules` directory segment out of tail matches, and look tails up in one index per analysis instead of scanning the inventory per reference.
+- [x] Treat any URL scheme of two or more characters (`data:`, `blob:`; one letter before `:` is read as a Windows drive) in `js_app` HTML refs and remote window loads as external, read HTML `src`/`href` without surrounding spaces, normalise exact tails before lookup, keep files in a `node_modules` directory segment out of tail matches, and look tails up in one index per analysis instead of scanning the inventory per reference (#2113).
       — claimed: Plastic-time, branch bugfix/r3.12-js-app-tail-resolution
+- [x] Read `file://localhost/` window loads as `file:///`, and treat a final `.` or `..` segment as a folder for `resolve_path` callers and HTML modulepreload references (#2113 follow-up).
+      — claimed: Plastic-time, branch bugfix/r3.12-js-app-file-localhost-dot-folders
 - [x] Preserve webpack factory parameter names when direct eval can read them.
       — claimed: Plastic-time, branch bugfix/r3.12-js-eval-param-renaming-1115
 - [x] Preserve void zero expressions when a with statement can dynamically resolve undefined.
@@ -2438,6 +2612,17 @@ Owner: open · Status: in progress
       — claimed: Chr0mium24, branch bugfix/r3.12-sqlite-real-affinity
 - [x] Tokenize tight SQLite `CREATE TABLE` identifiers, declared type spans, adjacent column constraints, signed or leading-dot `DEFAULT` clauses (`DEFAULT-5`, `DEFAULT.5`), and semicolon-terminated table options (`STRICT;`, `WITHOUT ROWID;`) without whitespace (#2108). — claimed: Plastic-time, branch bugfix/r3.12-sqlite-tight-type-and-clause-tokens
 - [x] Read `DEFAULT+X'41'` as the blob, and bare `DEFAULT` words with non-ASCII characters or a later `$` as their text, as SQLite does for rows written before the column was added, and skip a byte order mark where a token starts; the `--` after `e` fixture is DDL SQLite creates (#2108 follow-up). — claimed: Plastic-time, branch bugfix/r3.12-sqlite-default-followups
+- [x] A SQLite schema whose `sqlite_schema` b-tree couldn't be read whole (an unreadable child
+      page or row, a page of the wrong kind, a walk budget spent) was listed as complete: the
+      overview dropped the walk's `incomplete` flag and notes. `schema_truncated` is now set for
+      such a walk as well as for the object cap, its first notes are in the integrity notes, and
+      `db_sqlite_show` adds a `schema_incomplete` limitation, partial coverage, and an unknown-table
+      error that says only the listed part was searched
+      — claimed: mansur-akhmadi, branch bugfix/r3.12-sqlite-schema-incomplete
+- [x] Schema rows read only in part (cut or looping overflow chains, unread values, or text cut
+      at a per-value or aggregate schema budget) set `schema_truncated` and report how many
+      records have incomplete metadata or column lists. Display-only SQL shortening stays separate
+      — claimed: Afloat16, branch bugfix/r3.12-sqlite-partial-schema-20261119
 - [x] Require a complete DNS question's type and class fields before retaining it, and keep
       truncated questions out of packet inventories while reporting the incomplete message
       — claimed: Afloat16, branch bugfix/r3.12-dns-question-class-review-20261104
@@ -2987,6 +3172,16 @@ Owner: open · Status: in progress
       — claimed: Plastic-time, branch bugfix/r3.12-squashfs-table-bounds
 - [x] Require each raw or decoded file block to cover exactly its logical range, including the partial final block, so short blocks cannot shift later contents and long blocks cannot be hidden by truncation.
       — claimed: Afloat16, branch bugfix/r3.12-squashfs-block-output-size-20261110
+- [x] The firmware scan gave a squashfs 2.x or 3.x region the block size read at offset 12, which
+      is the uid table's start in those versions (`block_size` is there only in version 4): it
+      reads the 32-bit `block_size` they keep at offset 51, in either byte order, and leaves it
+      out of a superblock cut before it. Their description no longer names a compression read
+      from offset 20 (their inode table's start): it says unknown, as their details did
+      — claimed: mansur-akhmadi, branch bugfix/r3.12-squashfs-v3-block-size
+- [x] A squashfs 2.x or 3.x superblock is taken on its magic, version and `bytes_used` alone: check
+      its block size against its `block_log` (offset 34) as version 4's is, before calling it a
+      filesystem
+      — claimed: Afloat16, branch bugfix/r3.12-old-squashfs-block-layout-20261119
 - [x] Recover zero-filled cramfs hole blocks at full and partial page boundaries while retaining the existing recovery budgets.
       — claimed: Afloat16, branch bugfix/r3.12-cramfs-hole-blocks-20261110
 - [x] Charge firmware ZIP outputs before decoding the next member, so byte and file limits bound retained member data.

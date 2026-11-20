@@ -50,7 +50,7 @@ use craft_anything_engine::evidence::{ErrorCode, Evidence, ToolError, Unknown};
 use craft_anything_engine::{CallOptions, Caller, Consent, Engine, Mode, Settings, TargetKind, ToolOutput, clean_room};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use state::{CenterTab, ChatItem, ConsentAnswer, Fill, RailKind, Screen, UiState};
+use state::{CenterTab, ChatItem, ConsentAnswer, Fill, GameJob, RailKind, Screen, UiState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -159,8 +159,9 @@ pub enum Done {
     Detected(Vec<Detected>, Vec<craft_anything_ai::detect::DetectHint>),
     AgentConnection(String, Result<String, String>),
     /// The configured backends, the ones chosen to build with and to extract with, and each one's
-    /// options.
+    /// options. The first field is when the snapshot was read (see [`backends`]).
     Backends(
+        u64,
         Vec<BackendConfig>,
         Option<String>,
         Option<String>,
@@ -557,6 +558,9 @@ pub struct CraftApp {
     /// a save or a newer check.
     pub backend_keys: Option<std::collections::BTreeMap<String, bool>>,
     backend_keys_request: u64,
+    /// The newest backends snapshot shown (`Done::Backends`): one read before it, from a job that
+    /// finished later, is dropped, so a slow refresh can't put back what a save just changed.
+    backends_read: u64,
     /// What has been typed in each API backend's key field, kept across frames and after a failed
     /// save.
     pub backend_key_inputs: std::collections::BTreeMap<String, String>,
@@ -673,6 +677,7 @@ impl CraftApp {
             asset_keys: None,
             backend_keys: None,
             backend_keys_request: 0,
+            backends_read: 0,
             backend_key_inputs: Default::default(),
             backend_key_pending: Default::default(),
             facts: Default::default(),
@@ -1041,8 +1046,9 @@ impl CraftApp {
     }
 
     /// Run a tool for a button on a worker (play, preview, open a folder…); the result comes back
-    /// as `Done::Acted` and is shown by `acted`. A click is the person's consent.
-    pub fn act(&mut self, tool: &'static str, params: Value, title: String) {
+    /// as `Done::Acted` and is shown by `acted`. A click is the person's consent. The job's id lets
+    /// a screen ignore an answer that a newer request has replaced.
+    pub fn act(&mut self, tool: &'static str, params: Value, title: String) -> u64 {
         let engine = self.engine.clone();
         let scope = params.clone();
         self.jobs.spawn(title, false, move |j| {
@@ -1050,10 +1056,10 @@ impl CraftApp {
             let opts = CallOptions::new(Caller::Ui).with_consent(Consent::Granted).with_cancel(j.cancel.clone()).with_progress(&progress);
             let result = engine.call(tool, params, opts).map(|o| o.to_json().get("result").cloned().unwrap_or(Value::Null));
             Ok(Done::Acted { tool, params: scope, result })
-        });
+        })
     }
 
-    fn acted(&mut self, tool: &str, params: &Value, result: Result<Value, ToolError>) {
+    fn acted(&mut self, job: u64, tool: &str, params: &Value, result: Result<Value, ToolError>) {
         match (tool, result) {
             ("project_preview", Ok(v)) => {
                 let url = v.get("url").and_then(Value::as_str).map(str::to_string);
@@ -1121,9 +1127,9 @@ impl CraftApp {
                 | "game_unreal_texture_export"
                 | "game_unity_asset_export",
                 r,
-            ) => game_files::tool_done(self, tool, params, r),
+            ) => game_files::tool_done(self, job, tool, params, r),
             // The Game files screen's look at a picked game.
-            ("core_target_triage", r) => game_files::tool_done(self, tool, params, r),
+            ("core_target_triage", r) => game_files::tool_done(self, job, tool, params, r),
             (_, Ok(_)) => {}
             (_, Err(e)) if clean_room::is_refusal(&e) => self.state.modal = Some(state::Modal::DeepMode),
             (_, Err(e)) => self.toast(e.for_people(), true),
@@ -1559,6 +1565,21 @@ impl CraftApp {
         let done = match done.result {
             Ok(d) => d,
             Err(e) => {
+                self.log(true, e.clone());
+                // A Game files job that failed in the worker settles only its own request; one a
+                // newer pick replaced is logged above and says nothing.
+                if let Some(pending) = self.state.game.finish(job) {
+                    if pending.current {
+                        match pending.kind {
+                            GameJob::FolderScan => self.state.game.looking = false,
+                            GameJob::Listing => self.state.game.loading = false,
+                            // What the game is made of holds neither spinner.
+                            GameJob::Triage => {}
+                        }
+                        self.toast(e, true);
+                    }
+                    return;
+                }
                 if let Some(agent) = checked_agent {
                     self.agent_connections.insert(agent, Some(Err(e.clone())));
                 }
@@ -1571,7 +1592,6 @@ impl CraftApp {
                 if self.ghidra.job == Some(job) {
                     self.ghidra.job = None;
                 }
-                self.log(true, e.clone());
                 self.toast(e, true);
                 return;
             }
@@ -1593,7 +1613,7 @@ impl CraftApp {
             Done::Thumb { path, image } => self.thumb_ready(path, image),
             Done::Preview { path, image } => self.preview_ready(path, image),
             Done::Tool { tool, params, route, result } => self.tool_done(tool, params, route, result),
-            Done::Acted { tool, params, result } => self.acted(tool, &params, result),
+            Done::Acted { tool, params, result } => self.acted(job, tool, &params, result),
             Done::Opened { path, result } => match result {
                 Ok(v) => {
                     // Another target: a new conversation, so answers about two things don't mix.
@@ -1639,7 +1659,11 @@ impl CraftApp {
             Done::AgentConnection(name, result) => {
                 self.agent_connections.insert(name, Some(result));
             }
-            Done::Backends(b, builder, extractor, options, replaced) => {
+            Done::Backends(read, b, builder, extractor, options, replaced) => {
+                if read < self.backends_read {
+                    return;
+                }
+                self.backends_read = read;
                 if self.state.backend.as_ref().is_some_and(|n| !b.iter().any(|c| &c.name == n)) {
                     self.state.backend = None;
                 }
@@ -2198,7 +2222,10 @@ pub fn app_icon(size: f32) -> egui::Image<'static> {
 /// Run an action; a panic is logged and swallowed so one bad action never takes the app down.
 /// The configured backends and the ones chosen to build and to extract (read off the UI thread).
 pub(crate) fn backends(hub: &AiHub) -> Done {
+    // Numbered before reading: a snapshot read after a save always outnumbers one read before it.
+    static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Done::Backends(
+        READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         hub.backends(),
         hub.chosen(craft_anything_ai::Role::Builder),
         hub.chosen(craft_anything_ai::Role::Extractor),
@@ -2343,5 +2370,33 @@ pub mod updates;
 impl Drop for CraftApp {
     fn drop(&mut self) {
         self.updates.finish();
+    }
+}
+
+#[cfg(test)]
+mod backend_snapshot_tests {
+    use super::*;
+
+    /// A backends snapshot read before the one already shown (a slow refresh finishing after a
+    /// save's) is dropped, so it can't put back what the save changed.
+    #[test]
+    fn an_older_backends_snapshot_does_not_replace_a_newer_one() {
+        let mut app = demo::app(demo::engine(Mode::Experienced, true));
+        let snapshot = |read: u64, name: &str| {
+            let backend = BackendConfig {
+                name: name.into(),
+                kind: craft_anything_ai::BackendKind::AgentCli,
+                model: "claude-code".into(),
+                base_url: None,
+                ssh_host: None,
+                enabled: true,
+            };
+            Done::Backends(read, vec![backend], None, None, Default::default(), Default::default())
+        };
+        app.handle_done(jobs::Finished { job: 1, result: Ok(snapshot(10, "New")) });
+        app.handle_done(jobs::Finished { job: 2, result: Ok(snapshot(5, "Old")) });
+        assert_eq!(app.backends.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["New"]);
+        app.handle_done(jobs::Finished { job: 3, result: Ok(snapshot(11, "Newer")) });
+        assert_eq!(app.backends.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Newer"]);
     }
 }

@@ -307,6 +307,10 @@ pub fn find_result_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 pub fn result_lists(result: &Value) -> std::collections::BTreeMap<String, usize> {
     // The names that hold a list somewhere within reach.
     fn holding_lists<'a>(v: &'a Value, depth: usize, names: &mut std::collections::HashSet<&'a str>) {
+        #[cfg(test)]
+        if depth == 0 {
+            tests::LOOKUP_WALKS.set((true, tests::LOOKUP_WALKS.get().1));
+        }
         let Value::Object(m) = v else { return };
         if depth > RESULT_KEY_DEPTH {
             return;
@@ -321,6 +325,10 @@ pub fn result_lists(result: &Value) -> std::collections::BTreeMap<String, usize>
     // What each of those names reaches, found in one walk in `find_result_key`'s order: an
     // object's own keys before anything below it, and earlier values before later ones.
     fn reach<'a>(v: &'a Value, depth: usize, names: &std::collections::HashSet<&'a str>, found: &mut std::collections::HashMap<&'a str, &'a Value>) {
+        #[cfg(test)]
+        if depth == 0 {
+            tests::LOOKUP_WALKS.set((tests::LOOKUP_WALKS.get().0, true));
+        }
         let Value::Object(m) = v else { return };
         if depth > RESULT_KEY_DEPTH {
             return;
@@ -335,6 +343,15 @@ pub fn result_lists(result: &Value) -> std::collections::BTreeMap<String, usize>
         }
     }
     let mut out = std::collections::BTreeMap::new();
+    let Some(root) = result.as_object() else { return out };
+    for (name, value) in root {
+        if let Some(list) = value.as_array() {
+            out.insert(name.clone(), list.len());
+            if out.len() == MAX_LISTED {
+                return out;
+            }
+        }
+    }
     let mut names = std::collections::HashSet::new();
     holding_lists(result, 0, &mut names);
     if names.is_empty() {
@@ -342,8 +359,8 @@ pub fn result_lists(result: &Value) -> std::collections::BTreeMap<String, usize>
     }
     let mut found = std::collections::HashMap::new();
     reach(result, 0, &names, &mut found);
-    let mut level = vec![result];
-    for _ in 0..=RESULT_KEY_DEPTH {
+    let mut level: Vec<_> = root.values().filter(|v| v.is_object()).collect();
+    for _ in 1..=RESULT_KEY_DEPTH {
         let mut next = Vec::new();
         for m in level.iter().filter_map(|v| v.as_object()) {
             for (k, x) in m {
@@ -478,6 +495,10 @@ pub fn is_evidence_id(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    thread_local! {
+        pub(super) static LOOKUP_WALKS: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
+    }
+
     fn sample() -> Evidence {
         EvidenceBuilder::new(
             "core_overview_show",
@@ -521,6 +542,31 @@ mod tests {
         assert_eq!(result_lists(&deep).keys().collect::<Vec<_>>(), vec!["here"]);
         let many: serde_json::Map<String, Value> = (0..100).map(|i| (format!("l{i:03}"), serde_json::json!([]))).collect();
         assert_eq!(result_lists(&Value::Object(many)).len(), MAX_LISTED);
+    }
+
+    /// At the cap, the first root arrays win in map order. One free slot admits a nested list.
+    #[test]
+    fn root_arrays_fill_the_cap_before_nested_lists() {
+        for count in [MAX_LISTED - 1, MAX_LISTED, 10_000] {
+            let mut root = serde_json::Map::new();
+            root.insert("a_group".into(), serde_json::json!({"blocked": [1], "nested": [1, 2]}));
+            root.insert("blocked".into(), Value::Null);
+            let mut expected = std::collections::BTreeMap::new();
+            for i in 0..count {
+                let key = format!("rows{i:05}");
+                let len = i % 3;
+                root.insert(key.clone(), Value::Array(vec![Value::Null; len]));
+                if i < MAX_LISTED {
+                    expected.insert(key, len);
+                }
+            }
+            if count < MAX_LISTED {
+                expected.insert("nested".into(), 2);
+            }
+            LOOKUP_WALKS.set((false, false));
+            assert_eq!(result_lists(&Value::Object(root)), expected);
+            assert_eq!(LOOKUP_WALKS.get(), (count < MAX_LISTED, count < MAX_LISTED));
+        }
     }
 
     /// Names shadowed by scalar counts or earlier non-array fields must not consume the 64-list

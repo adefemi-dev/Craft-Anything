@@ -149,8 +149,12 @@ pub(crate) fn menu(app: &mut CraftApp, ui: &mut Ui, root: &Path) {
             }
         });
         ui.add_space(theme::space::XS);
-        let note = tr("Default follows Auto mode: with it on, what can be undone goes ahead and the rest is refused; with it off, the builder asks.");
-        ui.add(egui::Label::new(RichText::new(note).size(theme::SMALL).line_height(Some(theme::leading(theme::SMALL))).color(t.text_faint)).wrap());
+        let note = crate::i18n::tr_logical(
+            "Default follows Auto mode: with it on, what can be undone goes ahead and the rest is refused; with it off, the builder asks.",
+        );
+        crate::i18n::wrapped_label(ui, &note, egui::FontId::proportional(theme::SMALL), |r| {
+            r.line_height(Some(theme::leading(theme::SMALL))).color(t.text_faint)
+        });
     });
     if let Some((kind, choice)) = picked {
         app.set_approval(root, kind, choice);

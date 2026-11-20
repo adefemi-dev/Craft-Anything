@@ -2015,17 +2015,26 @@ impl CraftApp {
         }
     }
 
+    /// Whether an update may install now: it closes the app, so not while work is running or
+    /// unsaved, nor while a sign-in window is open (its job is invisible, and closing would lose
+    /// the sign-in before the browser profile is saved).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn safe_to_install(&self) -> bool {
+        !self.jobs.busy()
+            && !self.runs.any_busy()
+            && !self.conversation.as_ref().is_some_and(|c| c.is_busy())
+            && !self.settings_dirty
+            && self.save_due.is_none()
+            && self.saving.is_none()
+            && self.signing_in.is_none()
+    }
+
     /// Draw the whole interface.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let safe = !self.jobs.busy()
-                && !self.runs.any_busy()
-                && !self.conversation.as_ref().is_some_and(|c| c.is_busy())
-                && !self.settings_dirty
-                && self.save_due.is_none()
-                && self.saving.is_none();
+            let safe = self.safe_to_install();
             if self.updates.show(&ctx, safe) {
                 return;
             }

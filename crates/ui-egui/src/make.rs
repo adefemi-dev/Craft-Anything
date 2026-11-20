@@ -643,6 +643,17 @@ pub fn project_icon(m: &craft_anything_engine::workspace::Manifest) -> &'static 
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn no_update_installs_while_a_sign_in_window_is_open() {
+        let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
+        assert!(app.safe_to_install());
+        app.signing_in = Some(1);
+        assert!(!app.safe_to_install(), "installing closes the app before the sign-in is saved");
+        app.signing_in = None;
+        assert!(app.safe_to_install(), "and is fine again once it ends");
+    }
+
     #[test]
     fn web_addresses_are_checked_inline() {
         for ok in ["", "example.com", "https://a.b/c?d", "http://localhost:5173", "sub.example.co.uk/page"] {

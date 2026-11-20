@@ -1695,7 +1695,7 @@ dependencies = [
 [[package]]
 name = "craft-jsonrpc"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=42e0bd548246c4d34637b2b75945c9ce8ec9f98b#42e0bd548246c4d34637b2b75945c9ce8ec9f98b"
+source = "git+https://github.com/storytold/craft-libs?rev=512a1b8e8b59a7b325e7f69f6131aa8628470288#512a1b8e8b59a7b325e7f69f6131aa8628470288"
 dependencies = [
  "serde_json",
 ]
@@ -1712,7 +1712,7 @@ dependencies = [
 [[package]]
 name = "craft-mcp-server"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=42e0bd548246c4d34637b2b75945c9ce8ec9f98b#42e0bd548246c4d34637b2b75945c9ce8ec9f98b"
+source = "git+https://github.com/storytold/craft-libs?rev=512a1b8e8b59a7b325e7f69f6131aa8628470288#512a1b8e8b59a7b325e7f69f6131aa8628470288"
 dependencies = [
  "serde_json",
 ]

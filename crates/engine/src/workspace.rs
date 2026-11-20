@@ -931,15 +931,27 @@ impl Workspace {
     }
 
     fn write_manifest(&self, m: &Manifest) -> Result<(), ToolError> {
-        if self.is_read_only() {
+        let newer = self.manifest.version.max(self.version_on_disk());
+        if newer > MANIFEST_VERSION {
             return Err(ToolError::unsupported(format!(
-                "{} was made by a newer Craft Anything (craft.json version {}), so this one doesn't change it.",
-                self.manifest.name, self.manifest.version
+                "{} was made by a newer Craft Anything (craft.json version {newer}), so this one doesn't change it.",
+                self.manifest.name
             ))
             .with_remediation("Update Craft Anything to keep working on this project. Nothing was written."));
         }
         let bytes = serde_json::to_vec_pretty(m).map_err(|e| ToolError::internal(e.to_string()))?;
         write_atomic(&self.root.join(MANIFEST), &bytes)
+    }
+
+    /// The version of the `craft.json` on disk now (0 when it can't be read). A newer build running
+    /// at the same time may have brought the file forward since this copy was read, and a save from
+    /// this copy would drop the fields it added (review of #2099).
+    fn version_on_disk(&self) -> u32 {
+        std::fs::read(self.root.join(MANIFEST))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|d| d.get("version")?.as_u64())
+            .map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX))
     }
 
     /// Set the status and note, and save.
@@ -2099,6 +2111,29 @@ mod tests {
         old.as_object_mut().unwrap().remove("toolchain");
         let m = read_manifest(&serde_json::to_vec(&old).unwrap()).unwrap();
         assert_eq!((m.version, m.toolchain), (MANIFEST_VERSION, None), "brought forward with no toolchain");
+    }
+
+    /// Review of #2099: a build holding a copy read before a newer build brought the file forward
+    /// (both running at once) doesn't save over it, by any of the ways it saves.
+    #[test]
+    fn a_copy_read_before_a_newer_build_saved_doesnt_overwrite_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "Game", "a game", TargetRef::None).unwrap();
+        let mut newer: Value = serde_json::from_slice(&std::fs::read(ws.root.join(MANIFEST)).unwrap()).unwrap();
+        newer["version"] = (MANIFEST_VERSION + 1).into();
+        newer["a_field_from_the_future"] = "kept".into();
+        let newer = serde_json::to_string_pretty(&newer).unwrap();
+        std::fs::write(ws.root.join(MANIFEST), &newer).unwrap();
+        assert!(!ws.is_read_only(), "this copy was read before");
+        let err = ws.set_status(Status::Building, "x").unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotSupported);
+        assert!(err.message.contains(&format!("version {}", MANIFEST_VERSION + 1)), "{}", err.message);
+        assert_eq!(ws.save().unwrap_err().code, ErrorCode::NotSupported);
+        assert_eq!(ws.set_person(|m| m.note = "x".into()).unwrap_err().code, ErrorCode::NotSupported);
+        assert_eq!(std::fs::read_to_string(ws.root.join(MANIFEST)).unwrap(), newer, "the file is untouched");
+        // Its own version on disk still saves.
+        std::fs::write(ws.root.join(MANIFEST), b"not json").unwrap();
+        ws.save().unwrap();
     }
 
     /// #469: a saved session is only for the agent that saved it.
